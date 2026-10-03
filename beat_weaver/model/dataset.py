@@ -428,9 +428,18 @@ class BeatSaberDataset(Dataset):
             )
             np.save(cache_path, mel)
 
-        # Truncate audio to max_audio_len to fit in VRAM
-        if mel.shape[1] > self.config.max_audio_len:
-            mel = mel[:, : self.config.max_audio_len]
+        # Fix the audio to exactly max_audio_len frames. Long songs are truncated to
+        # fit in VRAM; short songs are zero-padded so the model sees the audio go
+        # silent and learns to emit END there. collate_fn pads to the longest mel
+        # in the batch and masks that padding out of attention, so without this
+        # the silence after a short song was invisible to the model and END had no
+        # audio evidence. At inference the final window is exactly this shape
+        # (real audio + zeros), so training must cover it.
+        max_len = self.config.max_audio_len
+        if mel.shape[1] > max_len:
+            mel = mel[:, :max_len]
+        elif mel.shape[1] < max_len:
+            mel = np.pad(mel, ((0, 0), (0, max_len - mel.shape[1])))
 
         # SpecAugment: random time/frequency masking (training only)
         if self.split == "train":
