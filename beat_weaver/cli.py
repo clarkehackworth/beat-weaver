@@ -36,7 +36,7 @@ def cmd_extract_official(args: argparse.Namespace) -> None:
         / "aa"
         / "StandaloneWindows64"
     )
-    extracted = extract_official_maps(bundles_dir, Path(args.output))
+    extracted = extract_official_maps(bundles_dir, Path(args.output), beat_saber_path=Path(args.beat_saber))
     print(f"Extracted {len(extracted)} map folders to {args.output}")
 
 
