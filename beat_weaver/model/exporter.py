@@ -28,6 +28,22 @@ _DIFFICULTY_RANK = {
 }
 
 
+def _export_audio(audio_path: Path, output_dir: Path) -> str:
+    """Place the song in the map folder as Ogg Vorbis (the only format Beat Saber plays)."""
+    import subprocess
+    if audio_path.suffix.lower() in (".ogg", ".egg"):
+        dest = output_dir / f"song{audio_path.suffix}"
+        shutil.copy2(audio_path, dest)
+        return dest.name
+    dest = output_dir / "song.egg"
+    subprocess.run(
+        ["ffmpeg", "-loglevel", "error", "-y", "-i", str(audio_path),
+         "-vn", "-c:a", "libvorbis", "-q:a", "6", "-f", "ogg", str(dest)],
+        check=True,
+    )
+    return dest.name
+
+
 def _build_info_dat(
     song_name: str,
     bpm: float,
@@ -118,10 +134,7 @@ def export_map(
     notes = decode_tokens(token_ids, bpm)
 
     # Determine audio filename — copy to folder as song.ogg/.egg
-    audio_path = Path(audio_path)
-    audio_filename = f"song{audio_path.suffix}"
-    dest_audio = output_dir / audio_filename
-    shutil.copy2(audio_path, dest_audio)
+    audio_filename = _export_audio(Path(audio_path), output_dir)
 
     # Write Info.dat
     info = _build_info_dat(song_name, bpm, difficulty, audio_filename)
@@ -161,10 +174,7 @@ def export_notes(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    audio_path = Path(audio_path)
-    audio_filename = f"song{audio_path.suffix}"
-    dest_audio = output_dir / audio_filename
-    shutil.copy2(audio_path, dest_audio)
+    audio_filename = _export_audio(Path(audio_path), output_dir)
 
     info = _build_info_dat(song_name, bpm, difficulty, audio_filename)
     (output_dir / "Info.dat").write_text(json.dumps(info, indent=2), encoding="utf-8")
