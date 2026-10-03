@@ -281,6 +281,8 @@ class BeatSaberDataset(Dataset):
         del df, table, grouped
 
         # Pre-tokenize all samples (deterministic — no need to repeat per epoch)
+        # The mel is cut to max_audio_len frames (16 per beat); labels must stop there too
+        max_audio_beats = self.config.max_audio_len / 16.0
         skipped_samples = 0
         for sample in self.samples:
             # Filter out notes with coordinates outside the standard 4x3 grid
@@ -298,6 +300,7 @@ class BeatSaberDataset(Dataset):
                 for n in sample["notes"]
                 if 0 <= n["x"] < 4 and 0 <= n["y"] < 3
                 and 0 <= n["cut_direction"] < 9 and n["color"] in (0, 1)
+                and n["beat"] < max_audio_beats
             ]
             if not notes:
                 skipped_samples += 1
