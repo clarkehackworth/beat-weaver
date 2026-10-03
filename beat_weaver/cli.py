@@ -176,6 +176,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=True),
     )
     model.eval()
+    model.to("cuda" if torch.cuda.is_available() else "cpu")
 
     audio, sr = load_audio(Path(args.audio), sr=config.sample_rate)
 
