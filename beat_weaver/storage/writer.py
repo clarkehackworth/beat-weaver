@@ -247,6 +247,8 @@ def write_parquet(
     for cols in notes_by_hash.values():
         for k in ("x", "y", "color", "cut_direction"):
             cols[k] = _clamp8(cols[k])
+    for cols in notes_by_hash.values():
+        cols["angle_offset"] = [max(-32768, min(32767, v)) for v in cols["angle_offset"]]
     for bcols in bombs_by_hash.values():
         for k in ("x", "y"):
             bcols[k] = _clamp8(bcols[k])
@@ -254,6 +256,12 @@ def write_parquet(
         for k in ("x", "y", "width", "height"):
             ocols[k] = _clamp8(ocols[k])
 
+    # Python ints in float32 columns raise if > 2**24 (malformed maps); coerce to float
+    for _by_hash in (notes_by_hash, bombs_by_hash, obstacles_by_hash):
+        for _cols in _by_hash.values():
+            for _k in ("bpm", "beat", "time_seconds", "duration_beats"):
+                if _k in _cols:
+                    _cols[_k] = [float(v) for v in _cols[_k]]
     # Convert accumulated columns to Arrow tables (one per song_hash)
     notes_tables = {
         h: pa.table(cols, schema=NOTES_SCHEMA)
