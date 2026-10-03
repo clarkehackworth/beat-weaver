@@ -138,7 +138,7 @@ def warm_mel_cache(
     computed = 0
     import os
     if max_workers is None:
-        max_workers = min(os.cpu_count() or 4, 8)
+        max_workers = min(os.cpu_count() or 4, 24)
 
     with ProcessPoolExecutor(max_workers=max_workers) as executor:
         futures = {
