@@ -12,7 +12,7 @@ class TestColorBalanceLoss:
     def test_balanced_near_zero(self):
         """Loss near zero for 50/50 left/right predictions."""
         # Create logits that predict equal LEFT and RIGHT probability
-        batch, seq, vocab = 2, 10, 291
+        batch, seq, vocab = 2, 10, 355
         logits = torch.zeros(batch, seq, vocab)
         # Set equal logits for all LEFT and RIGHT tokens
         logits[:, :, LEFT_BASE:LEFT_BASE + LEFT_COUNT] = 1.0
@@ -22,7 +22,7 @@ class TestColorBalanceLoss:
 
     def test_imbalanced_positive(self):
         """Loss > 0 for 100% left predictions."""
-        batch, seq, vocab = 2, 10, 291
+        batch, seq, vocab = 2, 10, 355
         logits = torch.full((batch, seq, vocab), -10.0)
         # All probability on LEFT tokens
         logits[:, :, LEFT_BASE:LEFT_BASE + LEFT_COUNT] = 5.0
@@ -31,7 +31,7 @@ class TestColorBalanceLoss:
 
     def test_gradient_flows(self):
         """Gradients flow through auxiliary loss."""
-        batch, seq, vocab = 2, 10, 291
+        batch, seq, vocab = 2, 10, 355
         logits = torch.randn(batch, seq, vocab, requires_grad=True)
         loss = _color_balance_loss(logits)
         loss.backward()
@@ -40,7 +40,7 @@ class TestColorBalanceLoss:
 
     def test_no_note_tokens(self):
         """Returns 0 when no positions have significant note probability."""
-        batch, seq, vocab = 2, 10, 291
+        batch, seq, vocab = 2, 10, 355
         logits = torch.zeros(batch, seq, vocab)
         # All probability on PAD/START/END tokens, none on notes
         logits[:, :, 0:8] = 10.0

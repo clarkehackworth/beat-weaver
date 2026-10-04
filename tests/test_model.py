@@ -21,7 +21,7 @@ from beat_weaver.model.transformer import (
 def small_config():
     """A small config for fast testing."""
     return ModelConfig(
-        vocab_size=291,
+        vocab_size=355,
         max_seq_len=128,
         n_mels=80,
         encoder_layers=2,
@@ -69,7 +69,7 @@ class TestAudioEncoder:
 class TestTokenDecoder:
     def test_output_shape(self, small_config):
         decoder = TokenDecoder(small_config)
-        tokens = torch.randint(0, 291, (2, 20))
+        tokens = torch.randint(0, 355, (2, 20))
         memory = torch.randn(2, 50, small_config.encoder_dim)
         token_mask = torch.ones(2, 20, dtype=torch.bool)
         memory_mask = torch.ones(2, 50, dtype=torch.bool)
@@ -82,13 +82,13 @@ class TestTokenDecoder:
         decoder.eval()
 
         memory = torch.randn(1, 10, small_config.encoder_dim)
-        tokens = torch.randint(0, 291, (1, 5))
+        tokens = torch.randint(0, 355, (1, 5))
 
         out_full = decoder(tokens, memory)
 
         # Change future token
         tokens_mod = tokens.clone()
-        tokens_mod[0, 4] = (tokens[0, 4].item() + 1) % 291
+        tokens_mod[0, 4] = (tokens[0, 4].item() + 1) % 355
 
         out_mod = decoder(tokens_mod, memory)
 
@@ -100,23 +100,23 @@ class TestBeatWeaverModel:
     def test_forward_shape(self, small_config):
         model = BeatWeaverModel(small_config)
         mel = torch.randn(2, 80, 50)
-        tokens = torch.randint(0, 291, (2, 20))
+        tokens = torch.randint(0, 355, (2, 20))
         mel_mask = torch.ones(2, 50, dtype=torch.bool)
         token_mask = torch.ones(2, 20, dtype=torch.bool)
 
         logits = model(mel, tokens, mel_mask, token_mask)
-        assert logits.shape == (2, 20, 291)
+        assert logits.shape == (2, 20, 355)
 
     def test_gradient_flow(self, small_config):
         """Verify gradients flow from loss back through both encoder and decoder."""
         model = BeatWeaverModel(small_config)
         mel = torch.randn(2, 80, 50)
-        tokens = torch.randint(0, 291, (2, 20))
-        target = torch.randint(0, 291, (2, 20))
+        tokens = torch.randint(0, 355, (2, 20))
+        target = torch.randint(0, 355, (2, 20))
 
         logits = model(mel, tokens)
         loss = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, 291), target.reshape(-1),
+            logits.reshape(-1, 355), target.reshape(-1),
         )
         loss.backward()
 
@@ -143,7 +143,7 @@ class TestRoPE:
     @pytest.fixture
     def rope_config(self):
         return ModelConfig(
-            vocab_size=291,
+            vocab_size=355,
             max_seq_len=128,
             n_mels=80,
             encoder_layers=2,
@@ -169,7 +169,7 @@ class TestRoPE:
     def test_rope_decoder_output_shape(self, rope_config):
         """RoPE decoder produces correct output shape."""
         decoder = TokenDecoder(rope_config)
-        tokens = torch.randint(0, 291, (2, 20))
+        tokens = torch.randint(0, 355, (2, 20))
         memory = torch.randn(2, 50, rope_config.encoder_dim)
         token_mask = torch.ones(2, 20, dtype=torch.bool)
         memory_mask = torch.ones(2, 50, dtype=torch.bool)
@@ -180,12 +180,12 @@ class TestRoPE:
         """Both RoPE encoder and decoder produce gradients."""
         model = BeatWeaverModel(rope_config)
         mel = torch.randn(2, 80, 50)
-        tokens = torch.randint(0, 291, (2, 20))
-        target = torch.randint(0, 291, (2, 20))
+        tokens = torch.randint(0, 355, (2, 20))
+        target = torch.randint(0, 355, (2, 20))
 
         logits = model(mel, tokens)
         loss = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, 291), target.reshape(-1),
+            logits.reshape(-1, 355), target.reshape(-1),
         )
         loss.backward()
 
@@ -248,7 +248,7 @@ class TestConformer:
     @pytest.fixture
     def conformer_config(self):
         return ModelConfig(
-            vocab_size=291,
+            vocab_size=355,
             max_seq_len=128,
             n_mels=80,
             encoder_layers=2,
@@ -292,7 +292,7 @@ class TestConformer:
     def test_conformer_sinusoidal_pe(self):
         """Conformer encoder works with sinusoidal PE (no RoPE)."""
         config = ModelConfig(
-            vocab_size=291,
+            vocab_size=355,
             max_seq_len=128,
             n_mels=80,
             encoder_layers=2,
@@ -318,12 +318,12 @@ class TestConformer:
         """Gradients flow through entire Conformer-based model."""
         model = BeatWeaverModel(conformer_config)
         mel = torch.randn(2, 80, 50)
-        tokens = torch.randint(0, 291, (2, 20))
-        target = torch.randint(0, 291, (2, 20))
+        tokens = torch.randint(0, 355, (2, 20))
+        target = torch.randint(0, 355, (2, 20))
 
         logits = model(mel, tokens)
         loss = torch.nn.functional.cross_entropy(
-            logits.reshape(-1, 291), target.reshape(-1),
+            logits.reshape(-1, 355), target.reshape(-1),
         )
         loss.backward()
 
@@ -346,7 +346,7 @@ class TestConformer:
     def test_conformer_onset_features(self):
         """Conformer encoder works with onset features (81-channel input)."""
         config = ModelConfig(
-            vocab_size=291,
+            vocab_size=355,
             max_seq_len=128,
             n_mels=80,
             encoder_layers=1,
@@ -389,7 +389,7 @@ class TestConformer:
         """Conformer model has more params than standard transformer."""
         conformer_model = BeatWeaverModel(conformer_config)
         std_config = ModelConfig(
-            vocab_size=291,
+            vocab_size=355,
             max_seq_len=128,
             n_mels=80,
             encoder_layers=2,
@@ -415,10 +415,10 @@ class TestMediumConfig:
         model = BeatWeaverModel(config)
         # Use small sequences for speed
         mel = torch.randn(1, 81, 100)  # onset features = 81 channels
-        tokens = torch.randint(0, 291, (1, 32))
+        tokens = torch.randint(0, 355, (1, 32))
         mel_mask = torch.ones(1, 100, dtype=torch.bool)
         token_mask = torch.ones(1, 32, dtype=torch.bool)
 
         logits = model(mel, tokens, mel_mask, token_mask)
-        assert logits.shape == (1, 32, 291)
+        assert logits.shape == (1, 32, 355)
         assert model.count_parameters() > 1_000_000  # Should be ~8M

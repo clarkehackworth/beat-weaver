@@ -7,7 +7,10 @@ import torch.nn.functional as F
 
 from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.tokenizer import (
-    BAR,
+    BAR_BASE,
+    BAR_COUNT,
+    bar_token,
+    is_bar_token,
     DIFF_EASY,
     DIFF_EXPERT_PLUS,
     END,
@@ -28,7 +31,9 @@ from beat_weaver.model.transformer import BeatWeaverModel
 from beat_weaver.schemas.normalized import Note
 
 
-def _build_grammar_mask(last_token: int, last_pos_in_bar: int = -1) -> torch.Tensor:
+def _build_grammar_mask(
+    last_token: int, last_pos_in_bar: int = -1, current_bar: int = -1,
+) -> torch.Tensor:
     """Build a boolean mask over the vocabulary for valid next tokens.
 
     Returns a tensor of shape (VOCAB_SIZE,) where True = allowed.
@@ -38,29 +43,35 @@ def _build_grammar_mask(last_token: int, last_pos_in_bar: int = -1) -> torch.Ten
         last_pos_in_bar: The last POS offset used in the current bar (-1 if none).
             Used to enforce strictly increasing positions within a bar,
             preventing multiple notes at the same beat.
+        current_bar: Index of the bar currently open (-1 before the first bar).
+            The only bar token allowed next is current_bar + 1, so bars can
+            neither repeat nor skip and the sequence cannot outrun the audio.
 
     Grammar rules:
         START      → DIFF_*
-        DIFF_*     → BAR
-        BAR        → POS_* | BAR | END
+        DIFF_*     → BAR_0
+        BAR_k      → POS_* | BAR_k+1 | END
         POS_*      → LEFT_* | LEFT_EMPTY
         LEFT_*     → RIGHT_* | RIGHT_EMPTY
-        RIGHT_*    → POS_* (strictly >) | BAR | END
+        RIGHT_*    → POS_* (strictly >) | BAR_k+1 | END
     """
     mask = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
+    next_bar = current_bar + 1
+    next_bar_ok = next_bar < BAR_COUNT
 
     if last_token == START:
         # After START → only difficulty tokens
         mask[DIFF_EASY: DIFF_EXPERT_PLUS + 1] = True
 
     elif DIFF_EASY <= last_token <= DIFF_EXPERT_PLUS:
-        # After DIFF → only BAR
-        mask[BAR] = True
+        # After DIFF → the first bar
+        mask[bar_token(0)] = True
 
-    elif last_token == BAR:
-        # After BAR → POS, BAR, or END
+    elif is_bar_token(last_token):
+        # After BAR_k → POS, BAR_k+1 (if any audio left), or END
         mask[POS_BASE: POS_BASE + POS_COUNT] = True
-        mask[BAR] = True
+        if next_bar_ok:
+            mask[bar_token(next_bar)] = True
         mask[END] = True
 
     elif POS_BASE <= last_token < POS_BASE + POS_COUNT:
@@ -79,7 +90,8 @@ def _build_grammar_mask(last_token: int, last_pos_in_bar: int = -1) -> torch.Ten
         min_next = last_pos_in_bar + 1
         if min_next < POS_COUNT:
             mask[POS_BASE + min_next: POS_BASE + POS_COUNT] = True
-        mask[BAR] = True
+        if next_bar_ok:
+            mask[bar_token(next_bar)] = True
         mask[END] = True
 
     else:
@@ -168,6 +180,7 @@ def generate(
     diff_token = difficulty_to_token(difficulty)
     tokens = [START, diff_token]
     last_pos_in_bar = -1  # Track last POS offset in current bar
+    current_bar = -1  # Index of the open bar; grammar only permits current_bar + 1 next
 
     for _ in range(config.max_seq_len - 2):
         # Prepare decoder input
@@ -179,7 +192,7 @@ def generate(
         next_logits = logits[0, -1]  # (vocab_size,)
 
         # Apply grammar mask (with position tracking for one-note-per-color-per-beat)
-        grammar_mask = _build_grammar_mask(tokens[-1], last_pos_in_bar).to(device)
+        grammar_mask = _build_grammar_mask(tokens[-1], last_pos_in_bar, current_bar).to(device)
         next_logits[~grammar_mask] = float("-inf")
 
         # Sample
@@ -187,8 +200,9 @@ def generate(
         tokens.append(next_token)
 
         # Update position tracking
-        if next_token == BAR:
+        if is_bar_token(next_token):
             last_pos_in_bar = -1  # Reset on new bar
+            current_bar = next_token - BAR_BASE
         elif POS_BASE <= next_token < POS_BASE + POS_COUNT:
             last_pos_in_bar = next_token - POS_BASE
 

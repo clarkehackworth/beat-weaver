@@ -5,7 +5,10 @@ import logging
 import pytest
 
 from beat_weaver.model.tokenizer import (
-    BAR,
+    BAR_BASE,
+    BAR_COUNT,
+    bar_token,
+    is_bar_token,
     DIFF_EASY,
     DIFF_EXPERT,
     DIFF_EXPERT_PLUS,
@@ -52,14 +55,15 @@ def _make_beatmap(difficulty: str, notes: list[Note]) -> NormalizedBeatmap:
 
 class TestVocabulary:
     def test_vocab_size(self):
-        assert VOCAB_SIZE == 291
+        assert VOCAB_SIZE == 355
 
     def test_token_ranges_no_overlap(self):
         """All token ranges should be contiguous and non-overlapping."""
         # PAD=0, START=1, END=2, DIFF=3-7, BAR=8, POS=9-72,
         # LEFT_EMPTY=73, LEFT=74-181, RIGHT_EMPTY=182, RIGHT=183-290
         assert LEFT_BASE + 108 == RIGHT_EMPTY  # 74 + 108 = 182
-        assert RIGHT_BASE + 108 == VOCAB_SIZE  # 183 + 108 = 291
+        assert RIGHT_BASE + 108 == BAR_BASE  # 183 + 108 = 291
+        assert BAR_BASE + BAR_COUNT == VOCAB_SIZE  # 291 + 64 = 355
 
 
 class TestCompoundTokenEncoding:
@@ -148,7 +152,7 @@ class TestEncodeBeatmap:
 
         assert tokens[0] == START
         assert tokens[1] == DIFF_HARD
-        assert tokens[2] == BAR
+        assert tokens[2] == bar_token(0)
         assert tokens[3] == POS_BASE + 0  # subdivision 0
         # Left note token
         expected_left = _encode_note_token(LEFT_BASE, 1, 0, 1)
@@ -182,7 +186,7 @@ class TestEncodeBeatmap:
         tokens = encode_beatmap(bm)
 
         # Count BAR tokens
-        bar_count = sum(1 for t in tokens if t == BAR)
+        bar_count = sum(1 for t in tokens if is_bar_token(t))
         assert bar_count == 2  # bar 0 and bar 1
 
     def test_duplicate_same_hand_logs(self, caplog):
@@ -270,3 +274,33 @@ class TestDescribeToken:
         tok = _encode_note_token(LEFT_BASE, 2, 1, 3)
         info = describe_token(tok)
         assert "LEFT(2,1,d=3)" == info.name
+
+
+class TestIndexedBars:
+    def test_roundtrip_preserves_absolute_bar(self):
+        """A note in bar 40 decodes back to bar 40 even when bars 1-39 are empty."""
+        from beat_weaver.schemas.normalized import DifficultyInfo, NormalizedBeatmap, SongMetadata
+        notes = [Note(beat=0.0, time_seconds=0, x=0, y=0, color=0, cut_direction=1),
+                 Note(beat=161.25, time_seconds=0, x=3, y=2, color=1, cut_direction=0)]
+        bm = NormalizedBeatmap(
+            metadata=SongMetadata(source="t", source_id="t", hash="t", bpm=120.0),
+            difficulty_info=DifficultyInfo(characteristic="Standard", difficulty="Expert",
+                                           difficulty_rank=0, note_jump_speed=0, note_jump_offset=0),
+            notes=notes)
+        tokens = encode_beatmap(bm)
+        assert tokens[2] == bar_token(0) and bar_token(40) in tokens
+        out = decode_tokens(tokens, 120.0)
+        assert sorted(n.beat for n in out) == [0.0, 161.25]
+
+    def test_bars_past_window_are_dropped_not_crashed(self):
+        from beat_weaver.schemas.normalized import DifficultyInfo, NormalizedBeatmap, SongMetadata
+        notes = [Note(beat=10.0, time_seconds=0, x=0, y=0, color=0, cut_direction=1),
+                 Note(beat=900.0, time_seconds=0, x=0, y=0, color=1, cut_direction=1)]
+        bm = NormalizedBeatmap(
+            metadata=SongMetadata(source="t", source_id="t", hash="t", bpm=120.0),
+            difficulty_info=DifficultyInfo(characteristic="Standard", difficulty="Expert",
+                                           difficulty_rank=0, note_jump_speed=0, note_jump_offset=0),
+            notes=notes)
+        tokens = encode_beatmap(bm)
+        assert max(t for t in tokens if is_bar_token(t)) == bar_token(BAR_COUNT - 1)
+        assert all(n.beat < 256 for n in decode_tokens(tokens, 120.0))

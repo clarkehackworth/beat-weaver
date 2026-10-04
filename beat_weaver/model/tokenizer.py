@@ -3,17 +3,25 @@
 Converts between NormalizedBeatmap and integer token sequences.
 No PyTorch dependency — pure Python + existing dataclasses.
 
-Token vocabulary (291 tokens):
+Token vocabulary (355 tokens):
     0       PAD
     1       START
     2       END
     3-7     DIFF_Easy .. DIFF_ExpertPlus
-    8       BAR
+    8       (unused; was the single BAR token)
     9-72    POS_0 .. POS_63  (1/16th note positions in a 4-beat bar)
     73      LEFT_EMPTY
     74-181  LEFT_x_y_d  (4 cols × 3 rows × 9 dirs)
     182     RIGHT_EMPTY
     183-290 RIGHT_x_y_d (4 cols × 3 rows × 9 dirs)
+    291-354 BAR_0 .. BAR_63  (absolute bar index within the audio window)
+
+Bars are indexed, not counted. With a single BAR token the decoder had to
+count bars itself across 1000+ tokens and drifted: measured on a trained
+model, a 64-bar window produced 127 BAR tokens, spreading the right number
+of notes over twice the time (half density) and pushing the tail past the
+audio. BAR_k names the bar outright, so the grammar can force BAR_k → BAR_k+1
+and the audio position maps to the token directly.
 
 Compound note encoding: base + x * 27 + y * 9 + direction
 """
@@ -51,8 +59,6 @@ _DIFF_LOOKUP["expert+"] = DIFF_EXPERT_PLUS
 
 # ── Bar / position tokens ──────────────────────────────────────────────────
 
-BAR = 8
-
 POS_BASE = 9
 POS_COUNT = 64  # 4 beats × 16 subdivisions
 
@@ -66,7 +72,21 @@ RIGHT_EMPTY = 182
 RIGHT_BASE = 183
 RIGHT_COUNT = 108
 
-VOCAB_SIZE = 291
+# Indexed bar tokens live after the note tokens so every pre-existing ID is unchanged.
+BAR_BASE = 291
+BAR_COUNT = 64  # max_audio_len (4096 frames) / 64 subdivisions per bar
+VOCAB_SIZE = BAR_BASE + BAR_COUNT  # 355
+
+
+def bar_token(bar_index: int) -> int:
+    """Token ID for bar ``bar_index`` (0-based within the audio window)."""
+    if not 0 <= bar_index < BAR_COUNT:
+        raise ValueError(f"bar index {bar_index} outside 0..{BAR_COUNT - 1}")
+    return BAR_BASE + bar_index
+
+
+def is_bar_token(token_id: int) -> bool:
+    return BAR_BASE <= token_id < BAR_BASE + BAR_COUNT
 
 # Grid constants
 COLS = 4
@@ -131,7 +151,7 @@ def encode_beatmap(beatmap: NormalizedBeatmap) -> list[int]:
         1. Sort notes by beat
         2. Quantize beats to 1/16th note grid
         3. Group notes by quantized position
-        4. Emit: START DIFF_x BAR POS_p LEFT_tok RIGHT_tok ... BAR ... END
+        4. Emit: START DIFF_x BAR_0 POS_p LEFT_tok RIGHT_tok ... BAR_1 ... END
         5. Handle multiple notes at same position (one per hand)
     """
     difficulty = beatmap.difficulty_info.difficulty
@@ -149,13 +169,14 @@ def encode_beatmap(beatmap: NormalizedBeatmap) -> list[int]:
         key = _quantize_beat(note.beat)
         groups.setdefault(key, []).append(note)
 
-    # Find the range of bars we need
-    max_bar = max(bar for bar, _ in groups)
+    # Find the range of bars we need. Bars past the audio window cannot be
+    # named (and are never in the labels: dataset clips notes to the window).
+    max_bar = min(max(bar for bar, _ in groups), BAR_COUNT - 1)
 
     tokens: list[int] = [START, diff_token]
 
     for bar_idx in range(max_bar + 1):
-        tokens.append(BAR)
+        tokens.append(bar_token(bar_idx))
 
         # Collect all subdivisions in this bar that have notes
         bar_subs = sorted(
@@ -235,8 +256,8 @@ def decode_tokens(token_ids: list[int], bpm: float) -> list[Note]:
             i += 1
             continue
 
-        if tok == BAR:
-            current_bar += 1
+        if is_bar_token(tok):
+            current_bar = tok - BAR_BASE
             i += 1
             continue
 
@@ -296,8 +317,8 @@ def describe_token(token_id: int) -> TokenInfo:
     if DIFF_EASY <= token_id <= DIFF_EXPERT_PLUS:
         name = _TOKEN_TO_DIFF[token_id]
         return TokenInfo(token_id, f"DIFF_{name}", "difficulty")
-    if token_id == BAR:
-        return TokenInfo(token_id, "BAR", "structure")
+    if is_bar_token(token_id):
+        return TokenInfo(token_id, f"BAR_{token_id - BAR_BASE}", "structure")
     if POS_BASE <= token_id < POS_BASE + POS_COUNT:
         pos = token_id - POS_BASE
         beat_in_bar = pos / SUBDIVISIONS_PER_BEAT

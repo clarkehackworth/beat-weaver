@@ -7,7 +7,10 @@ torch = pytest.importorskip("torch")
 from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.inference import _build_grammar_mask, generate, generate_full_song
 from beat_weaver.model.tokenizer import (
-    BAR,
+    BAR_BASE,
+    BAR_COUNT,
+    bar_token,
+    is_bar_token,
     DIFF_EASY,
     DIFF_EXPERT,
     DIFF_EXPERT_PLUS,
@@ -32,30 +35,45 @@ class TestGrammarMask:
         # Only difficulty tokens allowed
         assert mask[DIFF_EASY:DIFF_EXPERT_PLUS + 1].all()
         assert not mask[START]
-        assert not mask[BAR]
+        assert not mask[bar_token(0)]
         assert not mask[END]
 
     def test_after_difficulty(self):
         mask = _build_grammar_mask(DIFF_EXPERT)
-        # Only BAR allowed
-        assert mask[BAR]
+        # Only bar_token(0) allowed
+        assert mask[bar_token(0)]
         assert mask.sum() == 1
 
     def test_after_bar(self):
-        mask = _build_grammar_mask(BAR)
-        # POS, BAR, or END
+        mask = _build_grammar_mask(bar_token(0), current_bar=0)
+        # POS, the NEXT bar, or END
         assert mask[POS_BASE:POS_BASE + POS_COUNT].all()
-        assert mask[BAR]
+        assert mask[bar_token(1)]
         assert mask[END]
         assert not mask[START]
         assert not mask[LEFT_EMPTY]
+
+    def test_bars_are_sequential_and_bounded(self):
+        """Exactly one bar token is ever allowed: current_bar + 1, and none past the window."""
+        for k in range(BAR_COUNT - 1):
+            mask = _build_grammar_mask(bar_token(k), current_bar=k)
+            bars = mask[BAR_BASE:BAR_BASE + BAR_COUNT].nonzero().flatten().tolist()
+            assert bars == [k + 1], (k, bars)
+        # Last bar: no further bar token, only POS or END
+        mask = _build_grammar_mask(bar_token(BAR_COUNT - 1), current_bar=BAR_COUNT - 1)
+        assert not mask[BAR_BASE:BAR_BASE + BAR_COUNT].any()
+        assert mask[END]
+        # Same rule after a RIGHT token mid-bar
+        mask = _build_grammar_mask(RIGHT_EMPTY, last_pos_in_bar=5, current_bar=7)
+        bars = mask[BAR_BASE:BAR_BASE + BAR_COUNT].nonzero().flatten().tolist()
+        assert bars == [8]
 
     def test_after_pos(self):
         mask = _build_grammar_mask(POS_BASE + 10)
         # LEFT tokens
         assert mask[LEFT_EMPTY]
         assert mask[LEFT_BASE:LEFT_BASE + LEFT_COUNT].all()
-        assert not mask[BAR]
+        assert not mask[bar_token(0)]
         assert not mask[RIGHT_EMPTY]
 
     def test_after_left(self):
@@ -63,7 +81,7 @@ class TestGrammarMask:
         # RIGHT tokens
         assert mask[RIGHT_EMPTY]
         assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].all()
-        assert not mask[BAR]
+        assert not mask[bar_token(0)]
         assert not mask[LEFT_EMPTY]
 
     def test_after_left_empty(self):
@@ -74,15 +92,15 @@ class TestGrammarMask:
 
     def test_after_right(self):
         mask = _build_grammar_mask(RIGHT_BASE + 5)
-        # POS, BAR, or END
+        # POS, bar_token(0), or END
         assert mask[POS_BASE:POS_BASE + POS_COUNT].all()
-        assert mask[BAR]
+        assert mask[bar_token(0)]
         assert mask[END]
 
     def test_after_right_empty(self):
         mask = _build_grammar_mask(RIGHT_EMPTY)
         assert mask[POS_BASE:POS_BASE + POS_COUNT].all()
-        assert mask[BAR]
+        assert mask[bar_token(0)]
         assert mask[END]
 
 
@@ -90,7 +108,7 @@ class TestGenerate:
     @pytest.fixture
     def small_model(self):
         config = ModelConfig(
-            vocab_size=291,
+            vocab_size=355,
             max_seq_len=64,
             n_mels=80,
             encoder_layers=1,
@@ -121,14 +139,20 @@ class TestGenerate:
         mel = torch.randn(80, 20)
         tokens = generate(model, mel, "Expert", config, temperature=1.0, seed=42)
 
+        # Re-validate with the same state the generator tracks (bar + position)
+        last_pos_in_bar, current_bar = -1, -1
         for i in range(1, len(tokens)):
             prev = tokens[i - 1]
             curr = tokens[i]
-            mask = _build_grammar_mask(prev)
+            mask = _build_grammar_mask(prev, last_pos_in_bar, current_bar)
             assert mask[curr], (
                 f"Token {curr} not valid after {prev} at position {i}. "
                 f"Sequence so far: {tokens[:i+1]}"
             )
+            if is_bar_token(curr):
+                last_pos_in_bar, current_bar = -1, curr - BAR_BASE
+            elif POS_BASE <= curr < POS_BASE + POS_COUNT:
+                last_pos_in_bar = curr - POS_BASE
 
     def test_deterministic_with_seed(self, small_model):
         model, config = small_model
@@ -149,7 +173,7 @@ class TestGenerateFullSong:
     @pytest.fixture
     def small_model(self):
         config = ModelConfig(
-            vocab_size=291,
+            vocab_size=355,
             max_seq_len=64,
             max_audio_len=128,
             n_mels=80,
@@ -192,6 +216,18 @@ class TestGenerateFullSong:
         for note in notes:
             assert hasattr(note, "beat")
             assert note.beat >= 0
+
+    def test_generate_cannot_outrun_the_audio(self, small_model):
+        """With indexed bars the decoder can emit at most one token per bar, so a
+        window can never contain more bars than its audio (the drift that halved
+        density with a single counted BAR token)."""
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        for seed in range(8):
+            tokens = generate(model, mel, "Expert", config, temperature=2.0, seed=seed)
+            bars = [t - BAR_BASE for t in tokens if BAR_BASE <= t < BAR_BASE + BAR_COUNT]
+            assert bars == list(range(len(bars))), bars        # 0,1,2,... no repeats, no skips
+            assert len(bars) <= BAR_COUNT
 
     def test_full_song_no_notes_past_audio_end(self, small_model):
         """Notes must not land past the real audio (the last window is zero-padded)."""

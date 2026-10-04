@@ -9,7 +9,9 @@ sf = pytest.importorskip("soundfile")
 
 from beat_weaver.model.exporter import export_map, export_notes
 from beat_weaver.model.tokenizer import (
-    BAR,
+    BAR_BASE,
+    bar_token,
+    is_bar_token,
     DIFF_EXPERT,
     END,
     LEFT_EMPTY,
@@ -39,7 +41,7 @@ class TestExportMap:
     def test_creates_folder_structure(self, tmp_path, audio_file):
         # Simple token sequence: one left note at beat 0
         tokens = [
-            START, DIFF_EXPERT, BAR,
+            START, DIFF_EXPERT, bar_token(0),
             POS_BASE + 0,
             _encode_note_token(LEFT_BASE, 1, 0, 1),
             RIGHT_EMPTY,
@@ -54,7 +56,7 @@ class TestExportMap:
         assert (result / "song.ogg").exists()
 
     def test_info_dat_structure(self, tmp_path, audio_file):
-        tokens = [START, DIFF_EXPERT, BAR, POS_BASE, LEFT_EMPTY, RIGHT_EMPTY, END]
+        tokens = [START, DIFF_EXPERT, bar_token(0), POS_BASE, LEFT_EMPTY, RIGHT_EMPTY, END]
         output = tmp_path / "output_map"
         export_map(tokens, bpm=128.0, song_name="My Song",
                   audio_path=audio_file, output_dir=output)
@@ -74,7 +76,7 @@ class TestExportMap:
 
     def test_difficulty_dat_notes(self, tmp_path, audio_file):
         tokens = [
-            START, DIFF_EXPERT, BAR,
+            START, DIFF_EXPERT, bar_token(0),
             POS_BASE + 0,
             _encode_note_token(LEFT_BASE, 2, 1, 3),
             _encode_note_token(RIGHT_BASE, 1, 0, 1),

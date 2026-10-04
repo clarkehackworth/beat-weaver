@@ -12,7 +12,7 @@ class ModelConfig:
     """All hyperparameters for the BeatWeaver model."""
 
     # Tokenizer
-    vocab_size: int = 291
+    vocab_size: int = 355
     max_seq_len: int = 2048
 
     # Audio
