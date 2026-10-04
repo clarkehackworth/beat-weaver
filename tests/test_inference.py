@@ -193,6 +193,20 @@ class TestGenerateFullSong:
             assert hasattr(note, "beat")
             assert note.beat >= 0
 
+    def test_full_song_no_notes_past_audio_end(self, small_model):
+        """Notes must not land past the real audio (the last window is zero-padded)."""
+        model, config = small_model
+        # 2.3 windows: the final window is mostly padding the model could write into
+        for total_frames in (int(config.max_audio_len * 2.3), config.max_audio_len // 2):
+            mel = torch.randn(80, total_frames)
+            for seed in range(6):
+                notes = generate_full_song(
+                    model, mel, "Expert", config, bpm=120.0, temperature=1.5, seed=seed,
+                )
+                assert all(n.beat < total_frames / 16.0 for n in notes), (
+                    total_frames, seed, max(n.beat for n in notes),
+                )
+
     def test_full_song_overlap_no_duplicates(self, small_model):
         """No two notes at the exact same beat+color in the overlap zone."""
         model, config = small_model

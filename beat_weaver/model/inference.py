@@ -232,6 +232,10 @@ def generate_full_song(
     """
     total_frames = mel_spectrogram.shape[1]
     max_len = config.max_audio_len
+    # The model sometimes keeps writing notes into the zero padding after the
+    # audio ends (the last window is real audio + zeros). Nothing past the real
+    # audio can be a valid note, so drop it. Frames are 1/16 beat.
+    audio_end_beat = total_frames / 16.0
 
     # Single window — generate directly
     if total_frames <= max_len:
@@ -239,7 +243,7 @@ def generate_full_song(
             model, mel_spectrogram, difficulty, config,
             temperature=temperature, top_k=top_k, top_p=top_p, seed=seed,
         )
-        return decode_tokens(tokens, bpm)
+        return [n for n in decode_tokens(tokens, bpm) if n.beat < audio_end_beat]
 
     # Multi-window generation
     overlap = min(max_len // 4, 1024)
@@ -291,7 +295,7 @@ def generate_full_song(
     result: list[Note] = []
     for i, (start, notes) in enumerate(all_window_notes):
         min_beat = 0.0
-        max_beat = float("inf")
+        max_beat = audio_end_beat
 
         if i > 0:
             prev_start = all_window_notes[i - 1][0]
