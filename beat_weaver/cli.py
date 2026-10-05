@@ -1,6 +1,7 @@
 """Command-line interface for Beat Weaver data pipeline."""
 
 import argparse
+import os
 import logging
 from pathlib import Path
 
@@ -91,6 +92,21 @@ def _process_single_folder(
     return beatmaps
 
 
+def _find_map_folders(root: Path) -> list[Path]:
+    """Every folder under ``root`` that holds a map's info file, sorted.
+
+    Map makers ship the file as ``Info.dat`` or ``info.dat`` (the parser and the
+    audio manifest already accept both). Matching only ``Info.dat`` silently
+    dropped ~23% of downloaded community maps and 42% of a hand-picked favourites
+    set. Like ``Path.rglob`` this does not follow symlinked directories.
+    """
+    found = []
+    for dirpath, _dirs, files in os.walk(root):
+        if any(name.lower() == "info.dat" for name in files):
+            found.append(Path(dirpath))
+    return sorted(found)
+
+
 def cmd_process(args: argparse.Namespace) -> None:
     from concurrent.futures import ProcessPoolExecutor, as_completed
     from beat_weaver.storage.writer import write_parquet
@@ -100,8 +116,7 @@ def cmd_process(args: argparse.Namespace) -> None:
 
     # Collect all map folders up front
     folders = []
-    for info_file in sorted(input_dir.rglob("Info.dat")):
-        map_folder = info_file.parent
+    for map_folder in _find_map_folders(input_dir):
         source = _detect_source(map_folder, input_dir)
         folders.append((map_folder, source))
 
