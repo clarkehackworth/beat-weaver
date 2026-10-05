@@ -47,6 +47,9 @@ class ModelConfig:
 
     # Data weighting
     official_ratio: float = 0.2  # Target fraction of each batch from official maps
+    # Per-source batch share, e.g. {"official": 0.2, "local_custom": 0.25}. Sources
+    # not listed share the rest, weighted by BeatSaver score. Overrides official_ratio.
+    source_ratios: dict[str, float] | None = None
 
     # Data filtering
     min_difficulty: str = "Easy"  # Minimum difficulty to include

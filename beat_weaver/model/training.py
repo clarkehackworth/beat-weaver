@@ -291,7 +291,9 @@ def train(
         trainer.load_checkpoint(resume_from)
         logger.info("Resumed from %s (epoch %d)", resume_from, trainer.epoch)
 
-    sampler = build_weighted_sampler(train_dataset, config.official_ratio)
+    sampler = build_weighted_sampler(
+        train_dataset, config.official_ratio, config.source_ratios,
+    )
     use_cuda = trainer.device.type == "cuda"
     # Windows spawn-based multiprocessing causes DataLoader worker deadlocks
     # between epochs with persistent_workers. Use num_workers=0 on Windows.

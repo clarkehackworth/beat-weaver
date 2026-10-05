@@ -72,6 +72,34 @@ class TestGrammarMask:
         # unchanged when not gated
         assert _build_grammar_mask(bar_token(0), current_bar=0)[END]
 
+    def test_right_hand_cannot_share_left_hands_cell(self):
+        from beat_weaver.model.tokenizer import _encode_note_token
+        left = _encode_note_token(LEFT_BASE, 2, 1, 0)
+        mask = _build_grammar_mask(left, left_cell=(2, 1))
+        for d in range(9):
+            assert not mask[_encode_note_token(RIGHT_BASE, 2, 1, d)], d
+        # every other cell still allowed, and RIGHT_EMPTY too
+        assert mask[_encode_note_token(RIGHT_BASE, 1, 1, 0)]
+        assert mask[_encode_note_token(RIGHT_BASE, 2, 0, 0)]
+        assert mask[RIGHT_EMPTY]
+        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 9
+        # without the cell the full set is allowed (LEFT_EMPTY case)
+        assert _build_grammar_mask(LEFT_EMPTY)[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].all()
+
+    def test_same_direction_penalty_geometry(self):
+        from beat_weaver.model.inference import _same_direction_penalty
+        from beat_weaver.model.tokenizer import _encode_note_token
+        pen = _same_direction_penalty(LEFT_BASE, 1)             # previous cut: down
+        assert pen[_encode_note_token(LEFT_BASE, 0, 0, 1)] == 1.0  # down again: full penalty
+        assert pen[_encode_note_token(LEFT_BASE, 0, 0, 0)] == 0.0  # up: flows, no penalty
+        assert pen[_encode_note_token(LEFT_BASE, 0, 0, 2)] == 0.0  # left: perpendicular
+        assert 0.6 < pen[_encode_note_token(LEFT_BASE, 0, 0, 6)] < 0.8  # down-left: partial
+        assert pen[_encode_note_token(LEFT_BASE, 0, 0, 8)] == 0.0  # any-direction: never penalised
+        assert pen[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == 0   # other hand untouched
+        assert pen[:LEFT_BASE].sum() == 0
+        assert _same_direction_penalty(LEFT_BASE, 8).sum() == 0     # after an any-cut: nothing
+        assert _same_direction_penalty(LEFT_BASE, -1).sum() == 0    # no previous cut
+
     def test_bars_are_sequential_and_bounded(self):
         """Exactly one bar token is ever allowed: current_bar + 1, and none past the window."""
         for k in range(BAR_COUNT - 1):
@@ -266,6 +294,39 @@ class TestGenerateFullSong:
         generate_full_song(model, torch.randn(80, int(L * 2.5)), "Expert", config, bpm=120.0, seed=1)
         assert seen[:-1] == [2] * (len(seen) - 1)     # full windows: 2 bars
         assert seen[-1] == -(-(int(L * 2.5) - (len(seen) - 1) * (L - min(L // 4, 1024))) // 64)  # tail window
+
+    def test_generated_notes_never_share_a_cell(self, small_model):
+        """At any one position the two hands must be on different cells."""
+        from beat_weaver.model.tokenizer import _decode_note_token
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        pairs = 0
+        for seed in range(20):
+            tokens = generate(model, mel, "Expert", config, temperature=2.0, seed=seed)
+            for a, b in zip(tokens, tokens[1:]):
+                if LEFT_BASE <= a < LEFT_BASE + LEFT_COUNT and RIGHT_BASE <= b < RIGHT_BASE + RIGHT_COUNT:
+                    pairs += 1
+                    assert _decode_note_token(a, LEFT_BASE)[:2] != _decode_note_token(b, RIGHT_BASE)[:2], (seed, a, b)
+        assert pairs > 0, "no simultaneous pairs generated; test would be vacuous"
+
+    def test_flow_penalty_reduces_direction_repeats(self, small_model):
+        """A heavy penalty must lower the rate of same-direction consecutive cuts vs no penalty."""
+        from beat_weaver.model.tokenizer import _decode_note_token
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        def repeat_rate(flow_penalty):
+            rep = tot = 0
+            for seed in range(30):
+                tokens = generate(model, mel, "Expert", config, temperature=1.5, seed=seed, flow_penalty=flow_penalty)
+                for base, count in ((LEFT_BASE, LEFT_COUNT), (RIGHT_BASE, RIGHT_COUNT)):
+                    dirs = [_decode_note_token(t, base)[2] for t in tokens if base <= t < base + count]
+                    for d1, d2 in zip(dirs, dirs[1:]):
+                        if d1 != 8 and d2 != 8:
+                            tot += 1; rep += d1 == d2
+            return rep / max(tot, 1), tot
+        r0, n0 = repeat_rate(0.0); r1, n1 = repeat_rate(50.0)
+        assert n0 > 50 and n1 > 50
+        assert r1 < r0 * 0.5, (r0, r1)
 
     def test_generate_cannot_outrun_the_audio(self, small_model):
         """With indexed bars the decoder can emit at most one token per bar, so a

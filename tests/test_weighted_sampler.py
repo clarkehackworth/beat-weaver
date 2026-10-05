@@ -77,9 +77,9 @@ def test_custom_weights_proportional_to_score():
     sampler = build_weighted_sampler(ds, official_ratio=0.2)
     weights = list(sampler.weights)
 
-    # Custom weights should equal their scores
-    assert weights[1] == 0.75
-    assert weights[2] == 0.95
+    # Custom weights are proportional to their scores (the sampler only uses
+    # weights relatively; they are normalised so the group sums to its share)
+    assert weights[2] / weights[1] == pytest.approx(0.95 / 0.75)
 
 
 def test_missing_score_defaults_to_one():
@@ -93,9 +93,9 @@ def test_missing_score_defaults_to_one():
     sampler = build_weighted_sampler(ds, official_ratio=0.2)
     weights = list(sampler.weights)
 
-    # Both custom samples should have weight 1.0
-    assert weights[1] == 1.0
-    assert weights[2] == 1.0
+    # Both custom samples get the same (default 1.0) score, hence equal weight
+    assert weights[1] == pytest.approx(weights[2])
+    assert weights[1] > 0
 
 
 def test_num_samples_equals_dataset_length():

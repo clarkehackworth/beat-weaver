@@ -504,53 +504,56 @@ def collate_fn(
 
 def build_weighted_sampler(
     dataset: BeatSaberDataset, official_ratio: float = 0.2,
+    source_ratios: dict[str, float] | None = None,
 ) -> WeightedRandomSampler | None:
-    """Build a WeightedRandomSampler that oversamples official maps.
+    """Build a WeightedRandomSampler that fixes each source's share of a batch.
 
-    Official maps are weighted to fill ``official_ratio`` of each batch.
-    Custom maps are weighted by their BeatSaver score (higher-rated maps
-    sampled more often).
+    ``source_ratios`` maps a source name to the fraction of sampling
+    probability it should receive, e.g. ``{"official": 0.2, "local_custom":
+    0.25}``. Every source not named shares the remainder, weighted within
+    itself by BeatSaver score (so higher-rated community maps are drawn more
+    often). ``official_ratio`` is kept for the old two-way call and is only
+    used when ``source_ratios`` is None.
 
-    Returns ``None`` if all samples come from a single source (no
-    rebalancing needed).
+    A named source that has no samples is dropped and its share goes to the
+    remainder. Returns ``None`` if everything comes from one source.
     """
-    official_indices = []
-    custom_indices = []
-    custom_scores: list[float] = []
+    if source_ratios is None:
+        source_ratios = {"official": official_ratio}
 
+    by_source: dict[str, list[int]] = {}
     for i, sample in enumerate(dataset.samples):
-        if sample["source"] == "official":
-            official_indices.append(i)
-        else:
-            custom_indices.append(i)
-            # Default to 1.0 if score is missing
-            custom_scores.append(sample.get("score") or 1.0)
-
-    n_official = len(official_indices)
-    n_custom = len(custom_indices)
-
-    # No rebalancing needed if only one source present
-    if n_official == 0 or n_custom == 0:
+        by_source.setdefault(sample["source"], []).append(i)
+    if len(by_source) < 2:
         return None
 
-    # Compute weights so official samples collectively account for
-    # ``official_ratio`` of the total sampling probability:
-    #   sum(w_official) / (sum(w_official) + sum(w_custom)) = official_ratio
-    # Within custom maps, weight by score.
-    sum_custom_scores = sum(custom_scores)
-    w_official = (official_ratio * sum_custom_scores) / (n_official * (1.0 - official_ratio))
+    named = {src: r for src, r in source_ratios.items() if by_source.get(src)}
+    rest = [src for src in by_source if src not in named]
+    named_total = sum(named.values())
+    if named_total >= 1.0 or not rest:
+        raise ValueError(
+            f"source_ratios {source_ratios} leave no share for the remaining sources {rest}"
+        )
+    rest_share = 1.0 - named_total
+
+    # Remainder: weight by score, then scale so the group sums to rest_share.
+    rest_indices = [i for src in rest for i in by_source[src]]
+    rest_scores = [dataset.samples[i].get("score") or 1.0 for i in rest_indices]
+    rest_scale = rest_share / sum(rest_scores)
 
     weights = [0.0] * len(dataset)
-    for i in official_indices:
-        weights[i] = w_official
-    for i, idx in enumerate(custom_indices):
-        weights[idx] = custom_scores[i]
+    for i, sc in zip(rest_indices, rest_scores):
+        weights[i] = sc * rest_scale
+    for src, ratio in named.items():
+        w = ratio / len(by_source[src])  # uniform within the source
+        for i in by_source[src]:
+            weights[i] = w
 
     logger.info(
-        "Weighted sampler: %d official (w=%.4f), %d custom (mean_score=%.4f), "
-        "target official_ratio=%.0f%%",
-        n_official, w_official, n_custom,
-        sum_custom_scores / n_custom, official_ratio * 100,
+        "Weighted sampler: %s; remainder %s = %.0f%% (%d samples, mean_score=%.4f)",
+        ", ".join(f"{src}={ratio*100:.0f}% ({len(by_source[src])} samples)" for src, ratio in named.items()),
+        "+".join(rest), rest_share * 100, len(rest_indices),
+        sum(rest_scores) / len(rest_scores),
     )
 
     return WeightedRandomSampler(

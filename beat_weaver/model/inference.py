@@ -9,7 +9,11 @@ from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.tokenizer import (
     BAR_BASE,
     BAR_COUNT,
+    COLS,
+    DIRS,
+    ROWS,
     SUBDIVISIONS_PER_BAR,
+    _decode_note_token,
     bar_token,
     is_bar_token,
     DIFF_EASY,
@@ -37,9 +41,42 @@ def _audio_bars(real_frames: int) -> int:
     return max(1, min(BAR_COUNT, -(-real_frames // SUBDIVISIONS_PER_BAR)))
 
 
+# Saber travel direction for each cut direction (0=up 1=down 2=left 3=right
+# 4=up-left 5=up-right 6=down-left 7=down-right 8=any). Two consecutive cuts on
+# one hand "flow" when the second roughly reverses the first (a down-swing is
+# followed by an up-swing). The exception is 8 (any direction).
+_CUT_VEC = torch.tensor(
+    [[0, 1], [0, -1], [-1, 0], [1, 0], [-1, 1], [1, 1], [-1, -1], [1, -1], [0, 0]],
+    dtype=torch.float32,
+)
+_CUT_UNIT = torch.nn.functional.normalize(_CUT_VEC, dim=1)
+
+
+def _note_tokens_on_cell(base: int, x: int, y: int) -> slice:
+    """The 9 compound tokens (all cut directions) for one grid cell of one hand."""
+    start = base + x * (ROWS * DIRS) + y * DIRS  # same layout as _encode_note_token
+    return slice(start, start + DIRS)
+
+
+def _same_direction_penalty(base: int, prev_direction: int) -> torch.Tensor:
+    """Per-token penalty (0..1) for cutting the same way as the hand's last cut.
+
+    Returns a (VOCAB_SIZE,) tensor that is non-zero only over this hand's 108
+    note tokens. 1.0 = exact same direction, 0.0 = reversed or perpendicular.
+    """
+    pen = torch.zeros(VOCAB_SIZE)
+    if prev_direction < 0 or prev_direction == 8:
+        return pen
+    # dot product of each of the 9 directions with the previous one, clipped at 0
+    dots = (_CUT_UNIT @ _CUT_UNIT[prev_direction]).clamp(min=0.0)  # (9,)
+    dots[8] = 0.0
+    pen[base: base + COLS * ROWS * DIRS] = dots.repeat(COLS * ROWS)
+    return pen
+
+
 def _build_grammar_mask(
     last_token: int, last_pos_in_bar: int = -1, current_bar: int = -1,
-    audio_bars: int | None = None,
+    audio_bars: int | None = None, left_cell: tuple[int, int] | None = None,
 ) -> torch.Tensor:
     """Build a boolean mask over the vocabulary for valid next tokens.
 
@@ -58,6 +95,10 @@ def _build_grammar_mask(
             it. Without this the model stops early: END is legal after every
             bar, so a small chance per bar compounds over 64 bars (measured on
             a trained model: windows ending after 14 and 17 of 64 bars).
+        left_cell: (x, y) of the LEFT note just placed at this position, if any.
+            The RIGHT note may not occupy the same cell: two blocks cannot share
+            a grid square at one instant. Human maps never do this; the model
+            did it 1.5-2.5% of the time.
 
     Grammar rules:
         START      → DIFF_*
@@ -92,9 +133,11 @@ def _build_grammar_mask(
         mask[LEFT_BASE: LEFT_BASE + LEFT_COUNT] = True
 
     elif last_token == LEFT_EMPTY or (LEFT_BASE <= last_token < LEFT_BASE + LEFT_COUNT):
-        # After LEFT → RIGHT note or RIGHT_EMPTY
+        # After LEFT → RIGHT note or RIGHT_EMPTY (never on the LEFT note's cell)
         mask[RIGHT_EMPTY] = True
         mask[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] = True
+        if left_cell is not None:
+            mask[_note_tokens_on_cell(RIGHT_BASE, *left_cell)] = False
 
     elif last_token == RIGHT_EMPTY or (RIGHT_BASE <= last_token < RIGHT_BASE + RIGHT_COUNT):
         # After RIGHT → POS (strictly increasing), BAR, or END
@@ -165,6 +208,7 @@ def generate(
     seed: int | None = None,
     mel_mask: torch.Tensor | None = None,
     audio_bars: int | None = None,
+    flow_penalty: float = 2.0,
 ) -> list[int]:
     """Generate a token sequence autoregressively.
 
@@ -178,6 +222,12 @@ def generate(
         top_p: Top-p / nucleus filtering (1.0 = disabled).
         seed: Random seed for reproducibility.
         mel_mask: (T_audio,) — True for valid positions.
+        flow_penalty: Logit penalty applied to a note that cuts in the same
+            direction as that hand's previous cut (scaled by how parallel the
+            two cuts are). Encourages alternating swings so the sabers flow from
+            one note to the next. 0 disables it. Human Expert maps repeat a
+            direction ~4-5% of the time, the model ~7-12%, so this is a nudge
+            the model can still override, not a ban.
 
     Returns:
         List of token IDs including START and END.
@@ -201,6 +251,8 @@ def generate(
     tokens = [START, diff_token]
     last_pos_in_bar = -1  # Track last POS offset in current bar
     current_bar = -1  # Index of the open bar; grammar only permits current_bar + 1 next
+    left_cell: tuple[int, int] | None = None  # cell of the LEFT note at the open position
+    last_dir = {LEFT_BASE: -1, RIGHT_BASE: -1}  # previous cut direction per hand
 
     for _ in range(config.max_seq_len - 2):
         # Prepare decoder input
@@ -213,9 +265,16 @@ def generate(
 
         # Apply grammar mask (with position tracking for one-note-per-color-per-beat)
         grammar_mask = _build_grammar_mask(
-            tokens[-1], last_pos_in_bar, current_bar, audio_bars,
+            tokens[-1], last_pos_in_bar, current_bar, audio_bars, left_cell,
         ).to(device)
         next_logits[~grammar_mask] = float("-inf")
+
+        # Flow: discourage repeating a hand's last cut direction
+        if flow_penalty > 0:
+            if POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT:
+                next_logits -= flow_penalty * _same_direction_penalty(LEFT_BASE, last_dir[LEFT_BASE]).to(device)
+            elif tokens[-1] == LEFT_EMPTY or LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT:
+                next_logits -= flow_penalty * _same_direction_penalty(RIGHT_BASE, last_dir[RIGHT_BASE]).to(device)
 
         # Sample
         next_token = _sample_with_filter(next_logits, temperature, top_k, top_p)
@@ -227,6 +286,13 @@ def generate(
             current_bar = next_token - BAR_BASE
         elif POS_BASE <= next_token < POS_BASE + POS_COUNT:
             last_pos_in_bar = next_token - POS_BASE
+            left_cell = None
+        elif LEFT_BASE <= next_token < LEFT_BASE + LEFT_COUNT:
+            x, y, d = _decode_note_token(next_token, LEFT_BASE)
+            left_cell = (x, y)
+            last_dir[LEFT_BASE] = d
+        elif RIGHT_BASE <= next_token < RIGHT_BASE + RIGHT_COUNT:
+            last_dir[RIGHT_BASE] = _decode_note_token(next_token, RIGHT_BASE)[2]
 
         if next_token == END:
             break
