@@ -53,6 +53,25 @@ class TestGrammarMask:
         assert not mask[START]
         assert not mask[LEFT_EMPTY]
 
+    def test_audio_bars_gates_end_and_bars(self):
+        """END only once the last audio bar is open; no bar tokens after it."""
+        for last in (bar_token(0), POS_BASE + 3, LEFT_EMPTY, RIGHT_EMPTY):
+            # current_bar=0 of 3 audio bars: audio remains -> END forbidden, next bar open
+            mask = _build_grammar_mask(last, last_pos_in_bar=2, current_bar=0, audio_bars=3)
+            assert not mask[END], last
+        mask = _build_grammar_mask(bar_token(0), current_bar=0, audio_bars=3)
+        assert mask[bar_token(1)] and not mask[bar_token(2)] and not mask[END]
+        # last audio bar open (index 2): END allowed, nothing after it
+        for last in (bar_token(2), RIGHT_EMPTY):
+            mask = _build_grammar_mask(last, last_pos_in_bar=5, current_bar=2, audio_bars=3)
+            assert mask[END], last
+            assert not mask[BAR_BASE:BAR_BASE + BAR_COUNT].any(), last
+        # a single-bar window and a window longer than the vocabulary both stay non-empty
+        assert _build_grammar_mask(DIFF_EXPERT, audio_bars=1)[bar_token(0)]
+        assert _build_grammar_mask(RIGHT_EMPTY, 63, BAR_COUNT - 1, audio_bars=10**6).any()
+        # unchanged when not gated
+        assert _build_grammar_mask(bar_token(0), current_bar=0)[END]
+
     def test_bars_are_sequential_and_bounded(self):
         """Exactly one bar token is ever allowed: current_bar + 1, and none past the window."""
         for k in range(BAR_COUNT - 1):
@@ -216,6 +235,37 @@ class TestGenerateFullSong:
         for note in notes:
             assert hasattr(note, "beat")
             assert note.beat >= 0
+
+    def test_generate_fills_exactly_the_audio_bars(self, small_model):
+        """With audio_bars=N the sequence has bars 0..N-1 and only then ends: it can
+        neither stop early (the 14/64-bar windows) nor run past the audio."""
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        finished = 0
+        for seed in range(12):
+            tokens = generate(model, mel, "Expert", config, temperature=2.0, seed=seed, audio_bars=2)
+            bars = [t - BAR_BASE for t in tokens if BAR_BASE <= t < BAR_BASE + BAR_COUNT]
+            assert bars == list(range(len(bars))) and len(bars) <= 2
+            if tokens[-1] == END:
+                assert bars == [0, 1], (seed, bars)
+                finished += 1
+        assert finished > 0, "no sequence reached END; test would be vacuous"
+
+    def test_full_song_passes_each_windows_real_bars(self, small_model, monkeypatch):
+        import beat_weaver.model.inference as inf
+        model, config = small_model
+        seen = []
+        real_generate = inf.generate
+        def spy(*a, **kw):
+            seen.append(kw.get("audio_bars")); return real_generate(*a, **kw)
+        monkeypatch.setattr(inf, "generate", spy)
+        L = config.max_audio_len                      # 128 frames = 2 bars
+        generate_full_song(model, torch.randn(80, 40), "Expert", config, bpm=120.0, seed=1)
+        assert seen == [1]                            # 40 frames -> 1 bar
+        seen.clear()
+        generate_full_song(model, torch.randn(80, int(L * 2.5)), "Expert", config, bpm=120.0, seed=1)
+        assert seen[:-1] == [2] * (len(seen) - 1)     # full windows: 2 bars
+        assert seen[-1] == -(-(int(L * 2.5) - (len(seen) - 1) * (L - min(L // 4, 1024))) // 64)  # tail window
 
     def test_generate_cannot_outrun_the_audio(self, small_model):
         """With indexed bars the decoder can emit at most one token per bar, so a

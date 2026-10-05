@@ -9,6 +9,7 @@ from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.tokenizer import (
     BAR_BASE,
     BAR_COUNT,
+    SUBDIVISIONS_PER_BAR,
     bar_token,
     is_bar_token,
     DIFF_EASY,
@@ -31,8 +32,14 @@ from beat_weaver.model.transformer import BeatWeaverModel
 from beat_weaver.schemas.normalized import Note
 
 
+def _audio_bars(real_frames: int) -> int:
+    """Number of bars (64 frames each) needed to cover ``real_frames`` of audio."""
+    return max(1, min(BAR_COUNT, -(-real_frames // SUBDIVISIONS_PER_BAR)))
+
+
 def _build_grammar_mask(
     last_token: int, last_pos_in_bar: int = -1, current_bar: int = -1,
+    audio_bars: int | None = None,
 ) -> torch.Tensor:
     """Build a boolean mask over the vocabulary for valid next tokens.
 
@@ -46,6 +53,11 @@ def _build_grammar_mask(
         current_bar: Index of the bar currently open (-1 before the first bar).
             The only bar token allowed next is current_bar + 1, so bars can
             neither repeat nor skip and the sequence cannot outrun the audio.
+        audio_bars: Bars of real audio in the window. When given, END is not
+            allowed until the last of those bars is open, and no bar may follow
+            it. Without this the model stops early: END is legal after every
+            bar, so a small chance per bar compounds over 64 bars (measured on
+            a trained model: windows ending after 14 and 17 of 64 bars).
 
     Grammar rules:
         START      → DIFF_*
@@ -98,6 +110,13 @@ def _build_grammar_mask(
         # Unknown state — allow everything except PAD/START
         mask[2:] = True
 
+    if audio_bars is not None:
+        audio_bars = min(audio_bars, BAR_COUNT)
+        if current_bar < audio_bars - 1:
+            mask[END] = False  # audio remains: the sequence must reach the last bar
+        else:
+            mask[BAR_BASE: BAR_BASE + BAR_COUNT] = False  # last bar is open: only notes or END
+
     return mask
 
 
@@ -145,6 +164,7 @@ def generate(
     top_p: float = 1.0,
     seed: int | None = None,
     mel_mask: torch.Tensor | None = None,
+    audio_bars: int | None = None,
 ) -> list[int]:
     """Generate a token sequence autoregressively.
 
@@ -192,7 +212,9 @@ def generate(
         next_logits = logits[0, -1]  # (vocab_size,)
 
         # Apply grammar mask (with position tracking for one-note-per-color-per-beat)
-        grammar_mask = _build_grammar_mask(tokens[-1], last_pos_in_bar, current_bar).to(device)
+        grammar_mask = _build_grammar_mask(
+            tokens[-1], last_pos_in_bar, current_bar, audio_bars,
+        ).to(device)
         next_logits[~grammar_mask] = float("-inf")
 
         # Sample
@@ -256,6 +278,7 @@ def generate_full_song(
         tokens = generate(
             model, mel_spectrogram, difficulty, config,
             temperature=temperature, top_k=top_k, top_p=top_p, seed=seed,
+            audio_bars=_audio_bars(total_frames),
         )
         return [n for n in decode_tokens(tokens, bpm) if n.beat < audio_end_beat]
 
@@ -289,6 +312,7 @@ def generate_full_song(
         tokens = generate(
             model, window_mel, difficulty, config,
             temperature=temperature, top_k=top_k, top_p=top_p, seed=window_seed,
+            audio_bars=_audio_bars(min(max_len, total_frames - start)),
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)
