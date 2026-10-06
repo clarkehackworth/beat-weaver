@@ -231,3 +231,44 @@ class TestCacheVersioning:
         assert not (cache_dir / "abc_120.0.npy").exists()
         # VERSION file should exist now
         assert (cache_dir / "VERSION").exists()
+
+
+class TestUndecodableAudio:
+    """A song whose audio cannot be read must not be sampled (it crashed training)."""
+
+    def test_warm_up_records_it_and_the_dataset_skips_it(self, tmp_path):
+        import soundfile as sf
+        from beat_weaver.model.dataset import UNDECODABLE_FILE, warm_mel_cache
+
+        good = tmp_path / "good.wav"
+        sf.write(str(good), np.random.RandomState(0).randn(22050 * 2).astype(np.float32) * 0.1, 22050)
+        bad = tmp_path / "bad.egg"
+        bad.write_bytes(b"this is not audio at all" * 50)
+
+        processed, manifest_path = _make_simple_dataset(
+            tmp_path, ["Expert", "Expert"], ["Standard", "Standard"], [120.0, 120.0],
+        )
+        for f in (processed / "mel_cache").glob("*.npy"):
+            f.unlink()                                     # force a real warm-up
+        manifest_path.write_text(json.dumps({"hash_0000": str(good), "hash_0001": str(bad)}))
+        config = ModelConfig(min_difficulty="Expert", max_seq_len=64)
+
+        assert warm_mel_cache(processed, manifest_path, config, max_workers=1) == 1
+        recorded = json.loads((processed / "mel_cache" / UNDECODABLE_FILE).read_text())
+        assert recorded == ["hash_0001"]
+
+        songs = {s["song_hash"] for s in BeatSaberDataset(processed, manifest_path, config, "train").samples}
+        songs |= {s["song_hash"] for s in BeatSaberDataset(processed, manifest_path, config, "val").samples}
+        songs |= {s["song_hash"] for s in BeatSaberDataset(processed, manifest_path, config, "test").samples}
+        assert "hash_0001" not in songs
+        assert "hash_0000" in songs
+
+    def test_list_is_replaced_not_accumulated(self, tmp_path):
+        from beat_weaver.model.dataset import UNDECODABLE_FILE, warm_mel_cache
+        processed = tmp_path
+        (processed / "mel_cache").mkdir()
+        (processed / "mel_cache" / UNDECODABLE_FILE).write_text(json.dumps(["stale"]))
+        (processed / "metadata.json").write_text("[]")
+        manifest = tmp_path / "m.json"; manifest.write_text("{}")
+        warm_mel_cache(processed, manifest, ModelConfig(), max_workers=1)   # nothing to compute
+        assert json.loads((processed / "mel_cache" / UNDECODABLE_FILE).read_text()) == []

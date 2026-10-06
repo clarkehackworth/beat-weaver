@@ -65,6 +65,16 @@ def _cache_version_key(config: ModelConfig) -> str:
     return hashlib.md5(key.encode()).hexdigest()[:12]
 
 
+UNDECODABLE_FILE = "undecodable.json"
+
+
+def _write_undecodable(cache_dir: Path, hashes: list[str]) -> None:
+    """Record the songs whose audio could not be decoded (replaces the last list)."""
+    (cache_dir / UNDECODABLE_FILE).write_text(
+        json.dumps(sorted(hashes)), encoding="utf-8",
+    )
+
+
 def warm_mel_cache(
     processed_dir: Path,
     audio_manifest_path: Path,
@@ -75,6 +85,13 @@ def warm_mel_cache(
 
     Skips songs that already have a cached mel file. Returns the number of
     newly computed spectrograms.
+
+    Songs whose audio cannot be decoded (e.g. an .egg libsndfile rejects) are
+    written to ``mel_cache/undecodable.json`` and BeatSaberDataset leaves them
+    out. Without that, such a song is still in the manifest, has no cached mel,
+    and the DataLoader hits the decode error the first time the sampler draws it:
+    11 of the first run's Expert training charts were such songs, so training
+    crashed within minutes, twice.
     """
     cache_dir = processed_dir / "mel_cache"
     cache_dir.mkdir(parents=True, exist_ok=True)
@@ -127,6 +144,9 @@ def warm_mel_cache(
             todo.append((str(audio_path), song_hash, bpm, cache_path))
 
     if not todo:
+        # Anything that ever failed stays in `todo` (it is never cached), so an
+        # empty todo means nothing is undecodable.
+        _write_undecodable(cache_dir, [])
         logger.info("Mel cache is warm: all %d songs already cached", len(manifest))
         return 0
 
@@ -136,6 +156,7 @@ def warm_mel_cache(
     )
 
     computed = 0
+    failed: list[str] = []
     import os
     if max_workers is None:
         max_workers = min(os.cpu_count() or 4, 24)
@@ -153,10 +174,16 @@ def warm_mel_cache(
             result = future.result()
             if result is not None:
                 computed += 1
+            else:
+                failed.append(futures[future])
             if i % 500 == 0 or i == len(futures):
                 logger.info("Mel cache progress: %d/%d computed", i, len(futures))
 
-    logger.info("Mel cache warm: %d newly computed", computed)
+    _write_undecodable(cache_dir, failed)
+    logger.info(
+        "Mel cache warm: %d newly computed, %d undecodable (excluded from training)",
+        computed, len(failed),
+    )
     return computed
 
 
@@ -219,6 +246,18 @@ class BeatSaberDataset(Dataset):
         # Mel spectrogram cache directory
         self.mel_cache_dir = self.processed_dir / "mel_cache"
         self.mel_cache_dir.mkdir(parents=True, exist_ok=True)
+
+        # Leave out songs warm_mel_cache could not decode: they have no cached
+        # mel, so drawing one would crash a DataLoader worker mid-training.
+        undecodable_path = self.mel_cache_dir / UNDECODABLE_FILE
+        if undecodable_path.exists():
+            bad = set(json.loads(undecodable_path.read_text(encoding="utf-8")))
+            dropped = [h for h in bad if self.audio_manifest.pop(h, None) is not None]
+            if dropped:
+                logger.warning(
+                    "Excluding %d songs whose audio cannot be decoded (see %s)",
+                    len(dropped), undecodable_path,
+                )
 
         # Load notes from Parquet using pandas groupby (vectorized)
         from beat_weaver.storage.writer import read_notes_parquet
