@@ -37,7 +37,7 @@
   "min_bpm": 50.0,
   "max_bpm": 300.0,
   "source_ratios": {
-    "official": 0.2,
-    "local_custom": 0.25
+    "official": 0.1,
+    "local_custom": 0.15
   }
 }

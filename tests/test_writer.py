@@ -233,3 +233,40 @@ class TestReadNotesParquet:
         rg0 = pf.read_row_group(0)
         rg0_hash = set(rg0.column("song_hash").to_pylist())
         assert len(rg0_hash) == 1  # Single song per row group
+
+
+class TestSameMapFromTwoSources:
+    """The same map in two folders must collapse to one copy with the right tag."""
+
+    @staticmethod
+    def _copy(source: str, source_id: str):
+        bm = _make_beatmap("same_hash", n_notes=6, source=source)
+        bm.metadata.source_id = source_id
+        return bm
+
+    @pytest.mark.parametrize("order", [(0, 1, 2), (2, 1, 0), (1, 2, 0)])
+    def test_precedence_does_not_depend_on_input_order(self, tmp_path, order):
+        copies = [self._copy("beatsaver", "pool_a"), self._copy("local_custom", "fav"),
+                  self._copy("beatsaver", "pool_b")]
+        write_parquet([copies[i] for i in order], tmp_path)
+        import json
+        meta = json.loads((tmp_path / "metadata.json").read_text())
+        assert len(meta) == 1
+        assert meta[0]["source"] == "local_custom"
+        assert meta[0]["source_id"] == "fav"
+        assert len(meta[0]["difficulties"]) == 1           # no duplicate difficulty entries
+        notes = read_notes_parquet(tmp_path)
+        assert notes.num_rows == 6                          # not 18: copies are not appended
+        assert set(notes.column("source").to_pylist()) == {"local_custom"}
+
+    def test_official_beats_local_custom_beats_beatsaver(self, tmp_path):
+        write_parquet([self._copy("beatsaver", "a"), self._copy("official", "o"),
+                       self._copy("local_custom", "f")], tmp_path)
+        import json
+        assert json.loads((tmp_path / "metadata.json").read_text())[0]["source"] == "official"
+
+    def test_distinct_difficulties_of_one_map_are_all_kept(self, tmp_path):
+        a = _make_beatmap("h", n_notes=4, difficulty="Expert")
+        b = _make_beatmap("h", n_notes=5, difficulty="ExpertPlus")
+        write_parquet([a, b, _make_beatmap("h", n_notes=4, difficulty="Expert")], tmp_path)
+        assert read_notes_parquet(tmp_path).num_rows == 9   # 4 + 5, the repeated Expert dropped

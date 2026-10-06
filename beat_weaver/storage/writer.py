@@ -122,6 +122,36 @@ def _write_tables_chunked(
     return written
 
 
+# Lower rank wins when the same map arrives from more than one folder.
+_SOURCE_RANK = {"official": 0, "local_custom": 1}
+_DEFAULT_RANK = 2  # beatsaver and anything else
+
+
+def _dedupe_beatmaps(beatmaps: list[NormalizedBeatmap]) -> list[NormalizedBeatmap]:
+    """Keep one beatmap per (content hash, characteristic, difficulty).
+
+    A map's identity is a hash of its .dat files, so the same map found in two
+    places (a favourites folder and the BeatSaver download, or a Backups/ copy)
+    shares one hash. Before this, the writer appended every copy's notes to one
+    group, doubling them, and kept the metadata of whichever copy happened to be
+    processed first, which is arbitrary because workers finish in any order. A
+    hand-picked favourite that also sits in the download was therefore tagged
+    'beatsaver' about 83% of the time (444 of 535 in practice) and lost its
+    sampling weight.
+
+    The copy with the most specific source wins (official, then local_custom,
+    then everything else); ties break on source_id so the choice never depends on
+    input order. Output is sorted by that key so the Parquet is reproducible.
+    """
+    best: dict[tuple[str, str, str], tuple[tuple[int, str], NormalizedBeatmap]] = {}
+    for bm in beatmaps:
+        key = (bm.metadata.hash, bm.difficulty_info.characteristic, bm.difficulty_info.difficulty)
+        rank = (_SOURCE_RANK.get(bm.metadata.source, _DEFAULT_RANK), bm.metadata.source_id)
+        if key not in best or rank < best[key][0]:
+            best[key] = (rank, bm)
+    return [best[k][1] for k in sorted(best)]
+
+
 def write_parquet(
     beatmaps: list[NormalizedBeatmap],
     output_dir: Path,
@@ -156,7 +186,7 @@ def write_parquet(
     obstacles_by_hash: dict[str, dict[str, list]] = {}
     metadata_by_hash: dict[str, dict] = {}
 
-    for bm in beatmaps:
+    for bm in _dedupe_beatmaps(beatmaps):
         meta = bm.metadata
         diff = bm.difficulty_info
 
