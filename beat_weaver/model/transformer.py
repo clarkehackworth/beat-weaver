@@ -564,6 +564,21 @@ class BeatWeaverModel(nn.Module):
         self.config = config
         self.encoder = AudioEncoder(config)
         self.decoder = TokenDecoder(config)
+        # Absolute frame position added to the encoder output before the
+        # decoder attends to it. The encoder's RoPE makes positions relative
+        # inside its own self-attention only; the memory it emits carries no
+        # absolute position, so cross-attention could match audio by content
+        # but never by *where* ("bar 3 -> frame 192"). Without this the
+        # decoder cannot align tokens to frames and learns to ignore the
+        # audio altogether (measured: identical loss with the right song and
+        # the wrong song). The sinusoid is fixed, so no new weights.
+        self.memory_pos = SinusoidalPositionalEncoding(
+            config.encoder_dim, max_len=config.max_audio_len, dropout=0.0,
+        )
+        # Per-frame "is there a note here" logit from the encoder output alone.
+        # Trained with an auxiliary loss (see training.py) so the audio
+        # representation must encode where notes fall; unused at inference.
+        self.onset_head = nn.Linear(config.encoder_dim, 1)
 
     def forward(
         self,
@@ -583,9 +598,31 @@ class BeatWeaverModel(nn.Module):
         Returns:
             (batch, T_tokens, vocab_size) — logits for next token prediction
         """
-        memory = self.encoder(mel, mel_mask)
+        memory = self.encode_audio(mel, mel_mask)
         logits = self.decoder(tokens, memory, token_mask, mel_mask)
         return logits
+
+    def encode_audio(
+        self, mel: torch.Tensor, mel_mask: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        """Encoder output with absolute frame positions: what the decoder attends to.
+
+        Inference must call this, not ``self.encoder`` directly, or the memory
+        lacks the positions the model was trained with.
+        """
+        return self.memory_pos(self.encoder(mel, mel_mask))
+
+    def forward_with_onset(
+        self,
+        mel: torch.Tensor,
+        tokens: torch.Tensor,
+        mel_mask: torch.Tensor | None = None,
+        token_mask: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Like forward, but also returns per-frame onset logits (batch, T_audio)."""
+        memory = self.encode_audio(mel, mel_mask)
+        logits = self.decoder(tokens, memory, token_mask, mel_mask)
+        return logits, self.onset_head(memory).squeeze(-1)
 
     def count_parameters(self) -> int:
         """Count total trainable parameters."""

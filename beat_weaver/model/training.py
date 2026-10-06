@@ -10,12 +10,24 @@ from pathlib import Path
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 from torch.utils.data import DataLoader
 from torch.utils.tensorboard import SummaryWriter
 
 from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.dataset import BeatSaberDataset, build_weighted_sampler, collate_fn
-from beat_weaver.model.tokenizer import LEFT_BASE, LEFT_COUNT, PAD, RIGHT_BASE, RIGHT_COUNT
+from beat_weaver.model.tokenizer import (
+    BAR_BASE,
+    BAR_COUNT,
+    LEFT_BASE,
+    LEFT_COUNT,
+    PAD,
+    POS_BASE,
+    POS_COUNT,
+    RIGHT_BASE,
+    RIGHT_COUNT,
+    SUBDIVISIONS_PER_BAR,
+)
 from beat_weaver.model.transformer import BeatWeaverModel
 
 logger = logging.getLogger(__name__)
@@ -45,6 +57,43 @@ def _build_lr_scheduler(
         return 0.5 * (1.0 + __import__("math").cos(__import__("math").pi * progress))
 
     return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+def note_frame_targets(tokens: torch.Tensor, n_frames: int) -> torch.Tensor:
+    """Per-audio-frame note targets (batch, n_frames) from a token sequence.
+
+    A note sits at frame ``bar * 64 + pos`` (16 subdivisions per beat, 4 beats
+    per bar), read straight off the BAR_k and POS_p tokens, so the target comes
+    from the map and not from the audio. Frames past ``n_frames`` are dropped.
+    """
+    batch, seq = tokens.shape
+    targets = torch.zeros(batch, n_frames, device=tokens.device)
+    is_bar = (tokens >= BAR_BASE) & (tokens < BAR_BASE + BAR_COUNT)
+    is_pos = (tokens >= POS_BASE) & (tokens < POS_BASE + POS_COUNT)
+    # bar index in force at each position: the most recent BAR token
+    bar_val = torch.where(is_bar, tokens - BAR_BASE, torch.full_like(tokens, -1))
+    bar_cur = torch.cummax(bar_val, dim=1).values  # BAR tokens only increase
+    frame = bar_cur * SUBDIVISIONS_PER_BAR + (tokens - POS_BASE)
+    valid = is_pos & (bar_cur >= 0) & (frame < n_frames)
+    b_idx = torch.arange(batch, device=tokens.device).unsqueeze(1).expand(batch, seq)
+    targets[b_idx[valid], frame[valid]] = 1.0
+    return targets
+
+
+def apply_token_dropout(
+    tokens: torch.Tensor, p: float, protect: int = 2,
+) -> torch.Tensor:
+    """Replace a random ``p`` fraction of input tokens with PAD.
+
+    The first ``protect`` tokens (START, DIFF) are kept so the sequence still
+    says which difficulty it is. Targets are never touched; only the decoder's
+    view of the past is corrupted, which is what makes the audio worth using.
+    """
+    if p <= 0:
+        return tokens
+    drop = torch.rand(tokens.shape, device=tokens.device) < p
+    drop[:, :protect] = False
+    return tokens.masked_fill(drop, PAD)
 
 
 def _color_balance_loss(logits: torch.Tensor) -> torch.Tensor:
@@ -118,14 +167,28 @@ class Trainer:
             target_tokens = tokens[:, 1:]
             input_mask = token_mask[:, :-1]
 
+            # Corrupt the decoder's view of the past (targets stay intact) and
+            # build per-frame note targets from the clean tokens.
+            decoder_input = apply_token_dropout(input_tokens, self.config.token_dropout)
+            onset_targets = note_frame_targets(tokens, mel.size(2))
+
             with torch.amp.autocast(device_type=self.device.type, enabled=self.device.type == "cuda"):
-                logits = self.model(mel, input_tokens, mel_mask, input_mask)
+                logits, onset_logits = self.model.forward_with_onset(
+                    mel, decoder_input, mel_mask, input_mask,
+                )
                 # logits: (batch, seq_len-1, vocab_size)
                 # target: (batch, seq_len-1)
                 loss = self.criterion(
                     logits.reshape(-1, logits.size(-1)),
                     target_tokens.reshape(-1),
                 )
+                # Onset-alignment auxiliary loss on the encoder output
+                if self.config.onset_loss_weight > 0:
+                    onset_loss = F.binary_cross_entropy_with_logits(
+                        onset_logits.float(), onset_targets, reduction="none",
+                    )
+                    onset_loss = (onset_loss * mel_mask).sum() / mel_mask.sum().clamp(min=1)
+                    loss = loss + self.config.onset_loss_weight * onset_loss
                 # Color balance auxiliary loss
                 if self.config.color_balance_weight > 0:
                     loss = loss + self.config.color_balance_weight * _color_balance_loss(logits)
@@ -152,6 +215,8 @@ class Trainer:
             # Log every 50 steps
             if self.global_step % 50 == 0:
                 self.writer.add_scalar("train/loss_step", loss.item() * accum_steps, self.global_step)
+                if self.config.onset_loss_weight > 0:
+                    self.writer.add_scalar("train/onset_loss", onset_loss.item(), self.global_step)
                 lr = self.optimizer.param_groups[0]["lr"]
                 self.writer.add_scalar("train/lr", lr, self.global_step)
 

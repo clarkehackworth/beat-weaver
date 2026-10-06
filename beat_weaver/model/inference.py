@@ -244,7 +244,7 @@ def generate(
         mel_mask = mel_mask.unsqueeze(0).to(device)  # (1, T_audio)
 
     # Encode audio once
-    memory = model.encoder(mel, mel_mask)
+    memory = model.encode_audio(mel, mel_mask)
 
     # Start with [START, DIFF_x]
     diff_token = difficulty_to_token(difficulty)

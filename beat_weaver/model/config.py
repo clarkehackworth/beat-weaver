@@ -69,6 +69,21 @@ class ModelConfig:
 
     # Auxiliary losses
     density_loss_weight: float = 0.1
+    # Why these two exist: trained with teacher forcing alone, the decoder learned
+    # to predict the map from the previous tokens and ignore the audio entirely.
+    # Measured on a converged model: encoder output differed by 2% between two
+    # songs (90% vs silence); teacher-forced loss on a human chart was identical
+    # with the right song and with the wrong song (1.597 vs 1.597); the same seed
+    # produced a token-for-token identical first window for two different songs.
+    # Token dropout: fraction of input tokens replaced by PAD during training,
+    # so the previous tokens are an unreliable signal and the decoder has to
+    # consult the audio. The targets are untouched.
+    token_dropout: float = 0.3
+    # Onset-alignment loss: a head on the ENCODER output predicts, per audio
+    # frame, whether the map has a note there (target built from the tokens).
+    # Forces the encoder to carry note-relevant information for the decoder
+    # to attend to. Weight of this BCE term in the training loss.
+    onset_loss_weight: float = 0.5
     color_balance_weight: float = 0.0  # Weight for color balance auxiliary loss
 
     def save(self, path: Path) -> None:
