@@ -85,6 +85,10 @@ class ModelConfig:
     # to attend to. Weight of this BCE term in the training loss.
     onset_loss_weight: float = 0.5
     color_balance_weight: float = 0.0  # Weight for color balance auxiliary loss
+    # Two-stage decoding takes BAR/POS/END from the onset head and asks the
+    # decoder only what goes at each position, so train it on only that:
+    # the token loss covers LEFT/RIGHT targets and nothing else.
+    placement_only: bool = False
 
     def save(self, path: Path) -> None:
         """Save config to JSON file."""

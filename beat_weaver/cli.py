@@ -168,7 +168,8 @@ def cmd_train(args: argparse.Namespace) -> None:
     print(f"Training: {len(train_ds)} samples, Validation: {len(val_ds)} samples")
 
     resume = Path(args.resume) if args.resume else None
-    best_ckpt = train(config, train_ds, val_ds, Path(args.output), resume_from=resume)
+    init = Path(args.init_from) if args.init_from else None
+    best_ckpt = train(config, train_ds, val_ds, Path(args.output), resume_from=resume, init_from=init)
     print(f"Training complete. Best checkpoint: {best_ckpt}")
 
 
@@ -215,6 +216,8 @@ def cmd_generate(args: argparse.Namespace) -> None:
         model, mel_tensor, args.difficulty, config, bpm,
         temperature=args.temperature,
         seed=args.seed,
+        onset_guidance=args.onset_guidance,
+        two_stage=args.two_stage, notes_per_beat=args.notes_per_beat, min_gap_seconds=args.min_gap,
     )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
@@ -357,6 +360,8 @@ def main() -> None:
     tr.add_argument("--epochs", type=int, default=None, help="Max epochs")
     tr.add_argument("--batch-size", type=int, default=None, help="Batch size")
     tr.add_argument("--resume", default=None, help="Resume from checkpoint directory")
+    tr.add_argument("--init-from", default=None,
+                    help="Load only model weights from this checkpoint (fresh optimizer/schedule)")
 
     # generate
     gen = sub.add_parser("generate", help="Generate a Beat Saber map from audio")
@@ -369,6 +374,15 @@ def main() -> None:
                      help="Song BPM (auto-detected from audio if not provided)")
     gen.add_argument("--temperature", type=float, default=1.0, help="Sampling temperature")
     gen.add_argument("--seed", type=int, default=None, help="Random seed")
+    gen.add_argument("--onset-guidance", type=float, default=0.0,
+                     help="Weight on the encoder's per-frame onset logit added to note-position "
+                          "logits, tying note timing to the audio (0 = off)")
+    gen.add_argument("--two-stage", action="store_true",
+                     help="Note timing from the encoder's onset head, placement from the decoder")
+    gen.add_argument("--notes-per-beat", type=float, default=None,
+                     help="Two-stage density override (default: onset head's own expectation)")
+    gen.add_argument("--min-gap", type=float, default=0.2,
+                     help="Two-stage: minimum seconds between consecutive notes")
 
     # evaluate
     ev = sub.add_parser("evaluate", help="Evaluate model on test data")

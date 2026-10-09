@@ -46,3 +46,14 @@ class TestColorBalanceLoss:
         logits[:, :, 0:8] = 10.0
         loss = _color_balance_loss(logits)
         assert loss.item() == 0.0
+
+
+def test_placement_targets_keep_only_note_tokens():
+    import torch
+    from beat_weaver.model.tokenizer import (
+        START, END, PAD, LEFT_EMPTY, RIGHT_EMPTY, LEFT_BASE, RIGHT_BASE, POS_BASE, bar_token,
+    )
+    from beat_weaver.model.training import placement_targets
+    t = torch.tensor([[START, 5, bar_token(0), POS_BASE + 3, LEFT_EMPTY, RIGHT_BASE + 7, POS_BASE + 9, LEFT_BASE + 1, RIGHT_EMPTY, END, PAD]])
+    out = placement_targets(t).tolist()[0]
+    assert out == [PAD, PAD, PAD, PAD, LEFT_EMPTY, RIGHT_BASE + 7, PAD, LEFT_BASE + 1, RIGHT_EMPTY, PAD, PAD]

@@ -5,7 +5,9 @@ import pytest
 torch = pytest.importorskip("torch")
 
 from beat_weaver.model.config import ModelConfig
-from beat_weaver.model.inference import _build_grammar_mask, generate, generate_full_song
+from beat_weaver.model.inference import (
+    _build_grammar_mask, _crossover_outward_tokens, generate, generate_full_song,
+)
 from beat_weaver.model.tokenizer import (
     BAR_BASE,
     BAR_COUNT,
@@ -82,9 +84,9 @@ class TestGrammarMask:
         assert mask[_encode_note_token(RIGHT_BASE, 1, 1, 0)]
         assert mask[_encode_note_token(RIGHT_BASE, 2, 0, 0)]
         assert mask[RIGHT_EMPTY]
-        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 9
+        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 9 - 18  # minus crossover-outward tokens
         # without the cell the full set is allowed (LEFT_EMPTY case)
-        assert _build_grammar_mask(LEFT_EMPTY)[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].all()
+        assert _build_grammar_mask(LEFT_EMPTY)[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 18
 
     def test_same_direction_penalty_geometry(self):
         from beat_weaver.model.inference import _same_direction_penalty
@@ -119,7 +121,8 @@ class TestGrammarMask:
         mask = _build_grammar_mask(POS_BASE + 10)
         # LEFT tokens
         assert mask[LEFT_EMPTY]
-        assert mask[LEFT_BASE:LEFT_BASE + LEFT_COUNT].all()
+        assert mask[LEFT_BASE:LEFT_BASE + LEFT_COUNT].sum() == LEFT_COUNT - 18
+        assert not mask[_crossover_outward_tokens(LEFT_BASE)].any()
         assert not mask[bar_token(0)]
         assert not mask[RIGHT_EMPTY]
 
@@ -127,7 +130,8 @@ class TestGrammarMask:
         mask = _build_grammar_mask(LEFT_BASE + 5)
         # RIGHT tokens
         assert mask[RIGHT_EMPTY]
-        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].all()
+        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 18
+        assert not mask[_crossover_outward_tokens(RIGHT_BASE)].any()
         assert not mask[bar_token(0)]
         assert not mask[LEFT_EMPTY]
 
@@ -135,7 +139,7 @@ class TestGrammarMask:
         mask = _build_grammar_mask(LEFT_EMPTY)
         # RIGHT tokens
         assert mask[RIGHT_EMPTY]
-        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].all()
+        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 18
 
     def test_after_right(self):
         mask = _build_grammar_mask(RIGHT_BASE + 5)
@@ -327,6 +331,81 @@ class TestGenerateFullSong:
         r0, n0 = repeat_rate(0.0); r1, n1 = repeat_rate(50.0)
         assert n0 > 50 and n1 > 50
         assert r1 < r0 * 0.5, (r0, r1)
+
+    @staticmethod
+    def _fixed_onset_head(frames_high, n_frames):
+        class Fixed(torch.nn.Module):
+            def forward(self, memory):
+                out = torch.full((memory.size(0), memory.size(1), 1), -10.0)
+                for f in frames_high:
+                    out[:, f, 0] = 10.0
+                return out
+        return Fixed()
+
+    def test_onset_guidance_puts_notes_on_the_audios_onsets(self, small_model):
+        """With a head that marks frames 10, 20, 30 of bar 0, the first note of
+        bar 0 must land on a marked frame in nearly every guided run, and almost
+        never in unguided runs of the same model (so the test is not vacuous).
+        Only the first note is asserted: the guidance multiplies the decoder's own
+        preferences, and an untrained decoder has none, so after a marked frame is
+        used the rest is its choice."""
+        model, config = small_model
+        high = {10, 20, 30}
+        model.onset_head = self._fixed_onset_head(high, config.max_audio_len)
+        mel = torch.randn(80, config.max_audio_len)
+        def first_pos_in_bar0(g, seed):
+            toks = generate(model, mel, "Expert", config, temperature=1.5, seed=seed,
+                            audio_bars=2, onset_guidance=g)
+            bar = -1
+            for t in toks:
+                if BAR_BASE <= t < BAR_BASE + BAR_COUNT: bar = t - BAR_BASE
+                elif POS_BASE <= t < POS_BASE + POS_COUNT and bar == 0: return t - POS_BASE
+            return None
+        guided = [first_pos_in_bar0(8.0, s) for s in range(30)]
+        unguided = [first_pos_in_bar0(0.0, s) for s in range(30)]
+        assert sum(p in high for p in guided) >= 27, guided
+        assert sum(p in high for p in unguided) <= 6, unguided
+
+    def test_crossover_notes_never_face_outward(self, small_model):
+        """A left note in columns 2-3 never cuts right-ish, a right note in
+        columns 0-1 never cuts left-ish: those are the near-unhittable blocks."""
+        from beat_weaver.model.tokenizer import _decode_note_token
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        for seed in range(6):
+            for t in generate(model, mel, "Expert", config, seed=seed, audio_bars=4, temperature=2.0):
+                if LEFT_BASE <= t < LEFT_BASE + LEFT_COUNT:
+                    x, _, d = _decode_note_token(t, LEFT_BASE)
+                    assert not (x >= 2 and d in (3, 5, 7)), (x, d)
+                elif RIGHT_BASE <= t < RIGHT_BASE + RIGHT_COUNT:
+                    x, _, d = _decode_note_token(t, RIGHT_BASE)
+                    assert not (x <= 1 and d in (2, 4, 6)), (x, d)
+
+    def test_two_stage_notes_sit_exactly_on_the_scheduled_frames(self, small_model):
+        """Timing comes from the onset head alone: with frames 10, 20, 40 of
+        bar 0 and 5 of bar 1 marked, the output's note frames are exactly those,
+        every position holds a note, and the sequence still parses."""
+        model, config = small_model
+        high = {10, 20, 40, 64 + 5}
+        model.onset_head = self._fixed_onset_head(high, config.max_audio_len)
+        mel = torch.randn(80, config.max_audio_len)
+        for seed in range(5):
+            toks = generate(model, mel, "Expert", config, seed=seed, audio_bars=2, two_stage=True)
+            frames, bar = [], -1
+            for i, t in enumerate(toks):
+                if BAR_BASE <= t < BAR_BASE + BAR_COUNT: bar = t - BAR_BASE
+                elif POS_BASE <= t < POS_BASE + POS_COUNT:
+                    frames.append(bar * 64 + t - POS_BASE)
+                    assert not (toks[i + 1] == LEFT_EMPTY and toks[i + 2] == RIGHT_EMPTY)
+            assert frames == sorted(high), (seed, frames)
+            assert toks[-1] == END
+
+    def test_onset_guidance_zero_changes_nothing(self, small_model):
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        a = generate(model, mel, "Expert", config, seed=3, audio_bars=2)
+        b = generate(model, mel, "Expert", config, seed=3, audio_bars=2, onset_guidance=0.0)
+        assert a == b
 
     def test_generate_cannot_outrun_the_audio(self, small_model):
         """With indexed bars the decoder can emit at most one token per bar, so a

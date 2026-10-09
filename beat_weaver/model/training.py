@@ -17,6 +17,7 @@ from torch.utils.tensorboard import SummaryWriter
 from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.dataset import BeatSaberDataset, build_weighted_sampler, collate_fn
 from beat_weaver.model.tokenizer import (
+    LEFT_EMPTY, RIGHT_EMPTY,
     BAR_BASE,
     BAR_COUNT,
     LEFT_BASE,
@@ -78,6 +79,14 @@ def note_frame_targets(tokens: torch.Tensor, n_frames: int) -> torch.Tensor:
     b_idx = torch.arange(batch, device=tokens.device).unsqueeze(1).expand(batch, seq)
     targets[b_idx[valid], frame[valid]] = 1.0
     return targets
+
+
+def placement_targets(targets: torch.Tensor) -> torch.Tensor:
+    """Targets with everything but LEFT/RIGHT tokens set to PAD (ignored)."""
+    keep = (targets == LEFT_EMPTY) | (targets == RIGHT_EMPTY) | (
+        (targets >= LEFT_BASE) & (targets < LEFT_BASE + LEFT_COUNT)
+    ) | ((targets >= RIGHT_BASE) & (targets < RIGHT_BASE + RIGHT_COUNT))
+    return torch.where(keep, targets, torch.full_like(targets, PAD))
 
 
 def apply_token_dropout(
@@ -171,6 +180,8 @@ class Trainer:
             # build per-frame note targets from the clean tokens.
             decoder_input = apply_token_dropout(input_tokens, self.config.token_dropout)
             onset_targets = note_frame_targets(tokens, mel.size(2))
+            if self.config.placement_only:
+                target_tokens = placement_targets(target_tokens)
 
             with torch.amp.autocast(device_type=self.device.type, enabled=self.device.type == "cuda"):
                 logits, onset_logits = self.model.forward_with_onset(
@@ -242,6 +253,8 @@ class Trainer:
             target_tokens = tokens[:, 1:]
             input_mask = token_mask[:, :-1]
             target_mask = token_mask[:, 1:]
+            if self.config.placement_only:
+                target_tokens = placement_targets(target_tokens)
 
             logits = self.model(mel, input_tokens, mel_mask, input_mask)
             loss = self.criterion(
@@ -339,8 +352,12 @@ def train(
     val_dataset: BeatSaberDataset,
     output_dir: Path,
     resume_from: Path | None = None,
+    init_from: Path | None = None,
 ) -> Path:
     """Main training entry point.
+
+    ``init_from`` loads only the weights of a checkpoint (fresh optimizer,
+    schedule and best-loss), for fine-tuning under a different objective.
 
     Returns path to the best checkpoint directory.
     """
@@ -355,6 +372,11 @@ def train(
     if resume_from:
         trainer.load_checkpoint(resume_from)
         logger.info("Resumed from %s (epoch %d)", resume_from, trainer.epoch)
+    elif init_from:
+        model.load_state_dict(
+            torch.load(Path(init_from) / "model.pt", map_location=trainer.device, weights_only=True),
+        )
+        logger.info("Initialised weights from %s", init_from)
 
     sampler = build_weighted_sampler(
         train_dataset, config.official_ratio, config.source_ratios,
