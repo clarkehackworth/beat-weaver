@@ -212,12 +212,17 @@ def cmd_generate(args: argparse.Namespace) -> None:
     mel = beat_align_spectrogram(mel, sr=sr, hop_length=config.hop_length, bpm=bpm)
     mel_tensor = torch.from_numpy(mel)
 
+    from beat_weaver.model.inference import last_music_second
+
     notes = generate_full_song(
         model, mel_tensor, args.difficulty, config, bpm,
         temperature=args.temperature,
         seed=args.seed,
         onset_guidance=args.onset_guidance,
         two_stage=args.two_stage, notes_per_beat=args.notes_per_beat, min_gap_seconds=args.min_gap,
+        dynamics=args.dynamics, lead_in_seconds=args.lead_in, flow_penalty=args.flow_penalty,
+        end_seconds=last_music_second(audio, sr),
+        notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging,
     )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
@@ -383,6 +388,26 @@ def main() -> None:
                      help="Two-stage density override (default: onset head's own expectation)")
     gen.add_argument("--min-gap", type=float, default=0.2,
                      help="Two-stage: minimum seconds between consecutive notes")
+    gen.add_argument("--notes-per-second", type=float, default=None,
+                     help="Two-stage density target in notes/second (overrides --notes-per-beat; favourites Expert ~3.8, Expert+ ~4.8)")
+    gen.add_argument("--stream-bias", type=float, default=1.0,
+                     help="Two-stage: keep a run going while the next frame's onset prob >= this x the bar peak (1 = off, 0.6 = long streams)")
+    gen.add_argument("--doubles-bias", type=float, default=0.0,
+                     help="Logit bonus for a right-hand note right after a left-hand note (0 = off; ~1.5 reaches favourites' doubles rate)")
+    gen.add_argument("--vision-penalty", type=float, default=3.0,
+                     help="Logit penalty on notes in the middle-row centre cells (vision blocks); favourites keep ~2%% there")
+    gen.add_argument("--vision-max-run", type=int, default=2,
+                     help="Max consecutive hits containing a centre-cell note before those cells are masked (0 = no cap)")
+    gen.add_argument("--beat-focus", action="store_true",
+                     help="Two-stage: give a bar's extra notes to its strongest beats first, leaving rests between streams (Expert+)")
+    gen.add_argument("--allow-near-converging", action="store_true",
+                     help="Allow same-time notes on adjacent cells whose cuts are 135 deg apart with one aimed at the other (blocked by default)")
+    gen.add_argument("--flow-penalty", type=float, default=2.0,
+                     help="Logit penalty for a cut that breaks the saber's arc from the hand's last note (0 = off)")
+    gen.add_argument("--dynamics", type=float, default=1.0,
+                     help="Two-stage: how much each bar's note budget follows the music (0 = flat/staccato, 1 = full)")
+    gen.add_argument("--lead-in", type=float, default=2.0,
+                     help="Seconds at the start of the song with no notes")
 
     # evaluate
     ev = sub.add_parser("evaluate", help="Evaluate model on test data")
