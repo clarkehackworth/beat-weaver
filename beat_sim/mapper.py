@@ -21,6 +21,7 @@ import subprocess
 from pathlib import Path
 
 from beat_sim import evaluate, to_dict
+from beat_sim.meta import extract_cover, song_meta
 from beat_sim.loop import CHECKPOINT, CONTAINER, ENV, HOST, REMOTE_ROOT, fetch, remote, sync_code
 from beat_sim.music import find_audio
 from beat_sim.rhythm import BANDS
@@ -53,9 +54,9 @@ def flags_for(diff: str, nps: float, seed: int, beat_focus: bool = False) -> str
             f"--stream-bias {p['stream_bias']} --seed {seed}")
 
 
-def upload_song(song: Path) -> str:
+def upload_song(song: Path, stem: str | None = None) -> str:
     """Put the song in /data/generate on the container if it isn't there; return its remote name."""
-    name = song.name
+    name = f"{stem}{song.suffix}" if stem else song.name
     if not remote(f"ls {REMOTE_ROOT}/{shlex.quote(name)} 2>/dev/null", check=False).strip():
         with open(song, "rb") as f:
             subprocess.run(["ssh", HOST, f"docker exec -i {CONTAINER} sh -c 'cat > {shlex.quote(REMOTE_ROOT + '/' + name)}'"],
@@ -63,8 +64,11 @@ def upload_song(song: Path) -> str:
     return name
 
 
-def merge(winners: dict[str, Path], out: Path, song_name: str) -> Path:
-    """One folder, one Info.dat, every winning <Diff>.dat, audio copied once."""
+def merge(winners: dict[str, Path], out: Path, meta: dict, cover: Path | None = None) -> Path:
+    """One folder, one Info.dat, every winning <Diff>.dat, audio copied once.
+
+    `meta` overrides Info.dat fields (song name, artist, mapper, preview). `cover` is an image file to copy in.
+    """
     if out.exists():
         shutil.rmtree(out)
     out.mkdir(parents=True)
@@ -73,7 +77,10 @@ def merge(winners: dict[str, Path], out: Path, song_name: str) -> Path:
     audio = find_audio(first)
     shutil.copy(audio, out / audio.name)
     info["_songFilename"] = audio.name
-    info["_songName"] = song_name
+    info.update(meta)
+    if cover:
+        shutil.copy(cover, out / cover.name)
+    info["_coverImageFilename"] = cover.name if cover else ""
     beatmaps = []
     for diff in DIFFS:
         if diff not in winners:
@@ -121,27 +128,60 @@ def pick_ladder(cands: dict[str, list[tuple[float, float, Path, dict]]]) -> dict
     return {d: max(cands[d], key=lambda c: c[0]) for d in diffs}
 
 
+def score_candidate(arg: tuple[str, str, bool]):
+    """Score one candidate folder in a worker process. Returns (composite, nps, report dict, out-of-band names) or None.
+
+    With reuse=True a report.json already in the folder is used as is instead of rescoring (minutes per map).
+    """
+    from beat_weaver.parsers.beatmap_parser import parse_map_folder
+
+    folder, diff, reuse = Path(arg[0]), arg[1], arg[2]
+    cached = folder / "report.json"
+    if reuse and cached.exists():
+        d = json.loads(cached.read_text())
+        return d["composite"], d["rhythm"]["stats"]["nps"], d, [k for k, ok in d["rhythm"]["in_band"].items() if not ok]
+    bms = [b for b in parse_map_folder(folder) if b.difficulty_info.difficulty == diff]
+    if not bms:
+        return None
+    bm = bms[0]
+    ev = evaluate(bm.notes, bm.metadata.bpm, diff, audio=find_audio(folder))
+    d = to_dict(ev)
+    (folder / "report.json").write_text(json.dumps(d, indent=2))
+    return d["composite"], d["rhythm"]["stats"]["nps"], d, [k for k, ok in d["rhythm"]["in_band"].items() if not ok]
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("song", type=Path, help="audio file (mp3/ogg/wav)")
+    ap.add_argument("--name", help="short name for output folders and the remote copy (default: the file name)")
     ap.add_argument("--difficulties", nargs="+", default=list(DIFFS), choices=DIFFS)
     ap.add_argument("--candidates", type=int, default=4, help="maps generated per difficulty (seeds x density variants)")
     ap.add_argument("--checkpoint", default=CHECKPOINT)
     ap.add_argument("--out", type=Path, help="default ~/Downloads/<song>_map")
     ap.add_argument("--no-sync", action="store_true")
+    ap.add_argument("--workers", type=int, default=6, help="parallel scoring processes")
+    ap.add_argument("--reuse-reports", action="store_true", help="use each candidate's saved report.json instead of rescoring")
+    ap.add_argument("--title", help="song title for Info.dat (default: audio tags, else parsed from the file name)")
+    ap.add_argument("--artist", help="song artist for Info.dat (same fallbacks)")
+    ap.add_argument("--mapper", help="level author name (default: $BW_MAPPER, then the user config file, then BeatWeaver AI)")
+    ap.add_argument("--no-web-cover", action="store_true", help="don't look the cover up on YouTube / iTunes")
+    ap.add_argument("--cover", type=Path, help="cover image to put in the map (default: art embedded in the audio, else looked up on the web)")
     ap.add_argument("--score-only", action="store_true", help="rescore candidates already fetched")
     args = ap.parse_args()
 
-    stem = args.song.stem
+    stem = args.name or args.song.stem
     work = Path.home() / "Downloads" / f"{stem}_candidates"
     out = args.out or Path.home() / "Downloads" / f"{stem}_map"
     work.mkdir(parents=True, exist_ok=True)
+    meta = song_meta(args.song, args.title, args.artist, args.mapper)
+    print(f"metadata: title={meta['_songName']!r} artist={meta['_songAuthorName']!r} mapper={meta['_levelAuthorName']!r} "
+          f"preview={meta['_previewStartTime']}s")
     repo = Path(__file__).resolve().parent.parent
 
     if not args.score_only:
         if not args.no_sync:
             sync_code(repo)
-        remote_song = upload_song(args.song)
+        remote_song = upload_song(args.song, args.name)
         for diff in args.difficulties:
             base = target_nps(diff)
             for i in range(args.candidates):
@@ -153,39 +193,42 @@ def main() -> None:
                 name = f"{diff}__nps{nps:.2f}__s{seed}" + ("__focus" if focus else "")
                 if (work / name / "Info.dat").exists():
                     continue
-                out_dir = f"{REMOTE_ROOT}/{stem}_candidates/{name}"
+                out_dir = shlex.quote(f"{REMOTE_ROOT}/{stem}_candidates/{name}")
                 cmd = (f"cd /data && {ENV} python -m beat_weaver.cli generate --checkpoint {args.checkpoint} "
                        f"--audio {REMOTE_ROOT}/{shlex.quote(remote_song)} --difficulty {diff} --output {out_dir} "
                        f"{flags_for(diff, nps, seed, focus)}")
                 print(f"generate {name} ...", end="", flush=True)
                 log = remote(cmd)
                 print(" " + (log.strip().splitlines() or ["done"])[-1])
-                fetch(out_dir, work / name)
+                fetch(f"{REMOTE_ROOT}/{stem}_candidates/{name}", work / name)
 
     from beat_weaver.parsers.beatmap_parser import parse_map_folder
 
+    from concurrent.futures import ProcessPoolExecutor
+
+    folders = [(diff, f) for diff in args.difficulties for f in sorted(work.glob(f"{diff}__*"))]
     cands: dict[str, list] = {}
-    for diff in args.difficulties:
-        for folder in sorted(work.glob(f"{diff}__*")):
-            bms = [b for b in parse_map_folder(folder) if b.difficulty_info.difficulty == diff]
-            if not bms:
+    with ProcessPoolExecutor(max_workers=min(args.workers, max(len(folders), 1))) as ex:
+        for (diff, folder), res in zip(folders, ex.map(score_candidate, [(str(f), d, args.reuse_reports) for d, f in folders])):
+            if res is None:
                 continue
-            bm = bms[0]
-            ev = evaluate(bm.notes, bm.metadata.bpm, diff, audio=find_audio(folder))
-            (folder / "report.json").write_text(json.dumps(to_dict(ev), indent=2))
-            r = ev["rhythm"]
-            bad = [k for k, ok in r.in_band.items() if not ok]
-            print(f"  {folder.name:34s} composite={ev['composite']:5.1f} nps={r.stats['nps']:.2f} "
-                  f"doubles={r.stats['doubles']:.2f} out={','.join(bad) or '-'}")
-            cands.setdefault(diff, []).append((ev["composite"], r.stats["nps"], folder, ev))
+            composite, nps, ev, bad = res
+            print(f"  {folder.name:34s} composite={composite:5.1f} nps={nps:.2f} "
+                  f"doubles={ev['rhythm']['stats']['doubles']:.2f} out={','.join(bad) or '-'}")
+            cands.setdefault(diff, []).append((composite, nps, folder, ev))
     picked = pick_ladder(cands)
     winners = {d: c[2] for d, c in picked.items()}
-    report = {d: {"folder": c[2].name, **to_dict(c[3])} for d, c in picked.items()}
+    report = {d: {"folder": c[2].name, **c[3]} for d, c in picked.items()}
 
     if not winners:
         print("no candidates found")
         return
-    merge(winners, out, stem)
+    cover_dir = work / "_cover"
+    cover_dir.mkdir(exist_ok=True)
+    cover_name, cover_src = extract_cover(args.song, cover_dir, args.cover, meta["_songName"], meta["_songAuthorName"],
+                                          web=not args.no_web_cover)
+    print(f"cover: {cover_src or 'none found'}")
+    merge(winners, out, meta, cover_dir / cover_name if cover_name else None)
     (out / "report.json").write_text(json.dumps(report, indent=2))
     print(f"\nmap folder: {out}")
     for diff in args.difficulties:

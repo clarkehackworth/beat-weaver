@@ -49,6 +49,40 @@ each with `evaluate`, keeps the best, and merges the winners into
 `~/Downloads/<song>_candidates/` with a `report.json` each; `--score-only`
 re-picks without regenerating. Presets live in `mapper.PRESET`.
 
+### Map metadata
+
+The map's Info.dat is filled in from the song, not left generic:
+
+| Field | Source, first match wins |
+|---|---|
+| Song name | `--title`, the audio file's title tag, the file name |
+| Song artist | `--artist`, the audio file's artist tag, the file name |
+| Level author (mapper) | `--mapper`, `$BW_MAPPER`, `mapper_name` in `~/.config/beat-weaver/config.json`, else "BeatWeaver AI" |
+| Preview start | the loudest 10 seconds of the song (outside the first 5% and last 15%) |
+| Cover | `--cover image`, else art embedded in the audio, else looked up on the web (below), else none |
+| BPM | the generated map's (refined) tempo |
+
+Downloaded audio often has no tags, so the file name is parsed: `Artist - Title (Official Video)` and
+`Title [Official Video] - Artist` both work, `_26` is read as `&`, and upload words like "Lyrics" and
+"Official Audio" are dropped. It cannot be right for every name (a bare `Title - Artist` with no upload
+words reads backwards), so the mapper prints what it chose before generating. Fix it with `--title` and
+`--artist`. Keep your own mapper name in the config file, outside the repository:
+
+```
+mkdir -p ~/.config/beat-weaver
+echo '{"mapper_name": "Your Name"}' > ~/.config/beat-weaver/config.json
+```
+
+**Cover lookup.** With no `--cover` and no embedded art, the mapper searches YouTube for the song, using the audio
+file's own name (a YouTube download is named after its video) and keeping results that name both the song and the
+artist. It takes the best-matching video's thumbnail, centre-crops it to a 512 px square, and falls back to the
+iTunes album art for the song. Cover versions are never picked. The mapper prints where the cover came from; if it
+is wrong, pass `--cover`, or `--no-web-cover` for none. It parses YouTube's results page rather than using an API,
+so Google can break it without notice, in which case the iTunes lookup still works. Google image search is not used:
+it has no key-free interface.
+
+`--reuse-reports` re-merges already-scored candidates (new metadata, same maps) without rescoring.
+
 Bands for all five difficulties come from 535 favourite + 303 official maps
 (`python -m beat_sim.calibrate_bands <folders...>` regenerates them).
 
@@ -107,6 +141,7 @@ generating (after changing bands or weights). Playtest the top one or two.
 | `planner.py` | IK per swing seeded from the previous pose, min-jerk joint interpolation at 100 Hz, tip speed and acceleration |
 | `music.py` | ffmpeg-decoded RMS envelope; energy correlation and onset-hit metrics |
 | `calibrate_music.py` | bands for the music metrics over a folder of maps with audio |
+| `meta.py` | song title/artist/mapper name/preview/cover for Info.dat |
 | `rhythm.py` | density / stream / layout stats and favourites bands, `score(notes, bpm, difficulty)` |
 | `loop.py` | generate-and-score grid runner against the container |
 | `calibrate.py` | body-cap percentiles over a folder of maps |
