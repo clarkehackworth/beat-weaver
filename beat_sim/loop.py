@@ -3,7 +3,7 @@
     python -m beat_sim.loop --tag r1 --songs lying sawadika \\
         --grid "notes-per-beat=1.0,1.5,2.0" "min-gap=0.1,0.15" --extra="--two-stage --temperature 0.9"
 
-Each grid cell is one `beat-weaver generate` call per song inside the beat-weaver container on docker.lan,
+Each grid cell is one `beat-weaver generate` call per song inside the beat-weaver container on $BW_HOST,
 written to /data/generate/<tag>/<song>__<cell>/. Maps are copied to ~/Downloads/<tag>/ and scored with
 beat_sim.evaluate. Results land in ~/Downloads/<tag>/results.csv, ranked by mean composite over songs.
 Re-running with the same tag skips cells whose map folder already exists.
@@ -12,6 +12,7 @@ Re-running with the same tag skips cells whose map folder already exists.
 from __future__ import annotations
 
 import argparse
+import os
 import csv
 import itertools
 import json
@@ -24,14 +25,21 @@ from pathlib import Path
 from beat_sim import evaluate, to_dict
 from beat_sim.music import find_audio
 
-HOST = "jeff@docker.lan"
+# ssh target of the machine running the beat-weaver container, e.g. "user@gpu-box". Set BW_HOST in the environment.
+HOST = os.environ.get("BW_HOST", "")
 CONTAINER = "beat-weaver"
 REMOTE_ROOT = "/data/generate"
 CHECKPOINT = "models/current"  # see /data/models/README.md in the container
 ENV = "PYTHONPATH=/tmp/bwft NUMBA_CPU_NAME=generic NUMBA_CACHE_DIR=/tmp/nc_generic"
 
 
+def _need_host() -> None:
+    if not HOST:
+        raise SystemExit("BW_HOST is not set: export BW_HOST=user@host (the machine running the beat-weaver container)")
+
+
 def remote(cmd: str, check: bool = True) -> str:
+    _need_host()
     full = f"docker exec {CONTAINER} sh -c {shlex.quote(cmd)}"
     r = subprocess.run(["ssh", HOST, full], capture_output=True, text=True)
     if check and r.returncode:
@@ -40,6 +48,7 @@ def remote(cmd: str, check: bool = True) -> str:
 
 
 def sync_code(repo: Path) -> None:
+    _need_host()
     buf = io.BytesIO()
     with tarfile.open(fileobj=buf, mode="w") as tf:
         for name in ("beat_weaver", "configs", "pyproject.toml"):
@@ -75,6 +84,7 @@ def cell_name(cell: dict[str, str]) -> str:
 
 
 def fetch(remote_dir: str, local_dir: Path) -> None:
+    _need_host()
     local_dir.parent.mkdir(parents=True, exist_ok=True)
     r = subprocess.run(["ssh", HOST, f"docker exec {CONTAINER} tar -cf - -C {shlex.quote(str(Path(remote_dir).parent))} {shlex.quote(Path(remote_dir).name)}"],
                        capture_output=True, check=True)

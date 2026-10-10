@@ -52,6 +52,15 @@ re-picks without regenerating. Presets live in `mapper.PRESET`.
 Bands for all five difficulties come from 535 favourite + 303 official maps
 (`python -m beat_sim.calibrate_bands <folders...>` regenerates them).
 
+## Remote host
+
+`loop` and `mapper` run generation over ssh inside a container named `beat-weaver`.
+Point them at the machine that runs it:
+
+```
+export BW_HOST=user@gpu-host
+```
+
 ## The loop
 
 ```
@@ -60,7 +69,7 @@ python -m beat_sim.loop --tag r1 --songs lying sawadika \
 ```
 
 Runs every grid cell per song as `beat-weaver generate` inside the beat-weaver
-container on docker.lan (code synced first), copies maps to `~/Downloads/<tag>/`,
+container on the GPU host named by `BW_HOST` (code synced first), copies maps to `~/Downloads/<tag>/`,
 scores each, writes `results.csv`, prints cells ranked by mean composite.
 `--seeds N` generates each cell N times and reports mean ± sd per song, which
 you want once score gaps between cells are under ~5 points (one seed is noisy). Re-running
