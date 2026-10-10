@@ -5,48 +5,113 @@ How beat-weaver turns a song into a Beat Saber map, and how this fork differs fr
 
 ## The short version
 
-A song goes through two stages and a selection loop:
+Two kinds of machinery work together. A small neural network, trained on human-made maps, supplies
+the musical judgement: where notes are likely, and which hand, cell and cut direction fit. Ordinary
+code does everything else: audio processing, density, rests, playability rules, picking the best
+map, and writing the files.
+
+Every part below is labelled with what drives it:
+
+| Label | Meaning |
+|---|---|
+| **AI** | Learned. The behaviour comes from weights trained on map data. The weights are fixed when generating. |
+| **Rules** | Hand-written logic or standard signal processing. Deterministic, nothing learned. |
+| **AI + rules** | A learned model proposes, and rules constrain or reshape what it proposes. |
+
+Some rules use numbers measured from reference maps, such as the scoring bands. Those are
+calibrated from data but fixed: nothing updates them by training.
 
 ```
 song.mp3
   │
-  ├─ BPM detection + refinement ────────────────┐
-  ├─ log-mel spectrogram + onset channel         │
-  │                                              ▼
-  │                                   ┌────────────────────┐
-  └──────────────────────────────────►│ Conformer encoder  │
-                                      └─────────┬──────────┘
-                              audio memory      │
-                 ┌──────────────────────────────┴───────────────┐
-                 ▼                                              ▼
-       Stage 1: WHEN                                 Stage 2: WHAT
-       onset head → per-bar budget →                 token decoder picks hand, cell,
-       scheduler picks note frames                   cut direction for each frame,
-                 │                                   under masks and penalties
-                 └──────────────────►  merged note list  ◄──────┘
-                                              │
-                                   lead-in / tail trimmed
-                                              │
-                                   ┌──────────▼───────────┐
-                                   │ beat_sim evaluator    │  rhythm bands, music fit,
-                                   │ (several candidates)  │  kinematic body sim
-                                   └──────────┬───────────┘
-                                              ▼
-                                 best map per difficulty, merged
-                                 into one playable map folder
+  ▼
+[RULES]  Audio front end: mel spectrogram, tempo detection and refinement
+  │
+  ▼
+[AI]     Conformer encoder: audio -> learned features ──────────────────┐
+  │                                                                     │
+  ▼                                                                     │
+[AI]     Onset head: odds of a note at each 1/16 beat                   │
+  │                                                                     │
+  ▼                                                                     ▼
+[RULES]  Scheduler: note budget per  ───frames───►  [AI + RULES]  Token decoder: hand, cell and
+         bar, which frames get one                                 cut direction at each frame,
+                                                                   with bad placements blocked
+                                                                   or discouraged by rules
+                                                                              │
+  ┌───────────────────────────────────────────────────────────────────────────┘
+  ▼
+[RULES]  Trim: lead-in silence, nothing after the music ends
+  │
+  ▼
+[RULES]  beat_sim: score several candidates, keep the best per difficulty
+  │
+  ▼
+[RULES]  Export: title, artist, mapper, preview, cover, Ogg audio -> one map folder
 ```
 
 The model in production is `models/current` in the data volume. See
 [models/README.md](#where-the-model-lives) below.
 
-## Stage 0: audio front end
+### Who decides what
+
+| Step | Driven by | What decides |
+|---|---|---|
+| Mel spectrogram, 1/16-beat grid | Rules | Fixed signal processing |
+| Tempo | Rules | librosa's beat tracker (classical dynamic programming), then a fixed search for the tightest beat lock |
+| Audio understanding | AI | Conformer encoder |
+| Odds of a note at each frame | AI | Onset head |
+| How many notes, and which frames | Rules, fed by AI | Scheduler. The onset head's odds are its only learned input |
+| Hand, cell and cut direction | AI + rules | Decoder scores placements, rules remove or reweight some, then one is sampled |
+| Collisions, crossovers, vision blocks | Rules | Hard masks, enforced whatever the model predicts |
+| Flow, doubles, centre avoidance | Rules acting on AI scores | Soft penalties and biases that a strong model preference can outweigh |
+| Lead-in and tail trim | Rules | Loudness threshold on the waveform |
+| Scoring candidates | Rules | Statistics against reference bands, audio analysis, a kinematic simulation |
+| Best map, difficulty ladder | Rules | Search over the scored candidates |
+| Title, artist, mapper, preview, cover, audio export | Rules | File tags, file-name parsing, ffmpeg |
+| Training (offline) | AI | Gradient descent on human-made maps |
+| Data pipeline | Rules | Map parsers and the Parquet writer |
+
+### What the AI decides, and what it doesn't
+
+The AI decides:
+
+- **Where notes are likely.** The onset head's per-frame odds. Measured when it was added, its
+  top-k precision against held-out human maps was 0.56, against 0.08 for chance.
+- **Placement style.** For each chosen frame, each hand's cell and cut direction, or nothing,
+  shaped by the notes before it.
+- **Variety between candidates.** Sampling from the decoder's distribution, set by `--seed` and
+  temperature.
+
+Rules decide:
+
+- **The tempo and beat grid, the overall density, and the rests and streams.**
+- **Which placements are possible at all.** Same-time collisions, crossovers and vision blocks are
+  hard rules, enforced whatever the model predicts.
+- **How the song starts and ends,** and **which candidate wins** at each difficulty.
+- **All metadata.**
+
+What follows from that:
+
+- Flags such as `--notes-per-second` or `--beat-focus` change the map at once, because they
+  control rules. Changing the timing signal or the placement style needs a different model.
+- The score that picks the best map is not a model. It does not improve by training, only by
+  recalibrating its bands against reference maps.
+- Not measured: how much the production decoder's placement depends on the audio itself rather
+  than on the notes before it. Timing is the part known to come from the audio, through the
+  onset head.
+
+## Stage 0: audio front end (rules)
 
 `beat_weaver/model/audio.py`
+
+**Driven by: rules.** Standard signal processing; no learned model.
 
 - **Mel spectrogram:** 80 log-mel bins at 22.05 kHz, hop 512, plus one onset-strength channel.
 - **Beat alignment:** frames are resampled to a 1/16-beat grid, so one bar is 64 frames. Every
   downstream step works in that grid.
-- **BPM:** `detect_bpm` uses librosa's beat tracker, then `refine_bpm` searches ±1.5 BPM for the
+- **BPM:** `detect_bpm` uses librosa's beat tracker (classical dynamic programming, not a neural
+  network), then `refine_bpm` searches ±1.5 BPM for the
   tempo whose beat phase locks tightest to the audio's onset energy. Trackers are often off by a
   fraction of a BPM. A 0.7 BPM error walks the grid a full beat every 85 seconds, which made
   verses start empty and end crowded. The tempo only moves when the best lock is at least 5%
@@ -54,9 +119,12 @@ The model in production is `models/current` in the data volume. See
   80.7 corrected to 80.0, a 12.7% gain). On songs without one it is under 0.5% and the score is
   noise, so the detector's tempo is kept.
 
-## The model
+## The model (AI)
 
 `beat_weaver/model/transformer.py`, `config.py`
+
+**Driven by: AI.** Everything in this section is learned from map data in an offline training run.
+At generation time the weights are fixed; the only randomness is sampling.
 
 An encoder-decoder transformer. Production uses the medium Conformer (about 9.4M parameters).
 
@@ -72,9 +140,13 @@ An encoder-decoder transformer. Production uses the medium Conformer (about 9.4M
   tokens, and compound note tokens: 108 per hand, one for each cell (4 × 3) and direction (9),
   plus an empty token per hand.
 
-## Stage 1: when notes happen
+## Stage 1: when notes happen (AI + rules)
 
 `_onset_schedule` in `beat_weaver/model/inference.py`
+
+**Driven by: AI + rules.** The onset head (AI) supplies the odds that a note starts at each frame.
+Everything after that is a deterministic algorithm: how many notes, which frames, where streams and
+rests fall.
 
 The decoder never learned to read timing from the audio (see the history below), so timing comes
 from the onset head instead.
@@ -91,13 +163,18 @@ from the onset head instead.
    beats, which leaves rests between streams. Expert+ needs this, or high density spreads into one
    unbroken stream.
 
-## Stage 2: what each note is
+## Stage 2: what each note is (AI + rules)
 
 `generate` in `beat_weaver/model/inference.py`
 
+**Driven by: AI + rules.** The decoder (AI) scores every possible placement. Rules then remove some
+placements outright or nudge the scores, and the final choice is sampled from what is left.
+
 The decoder writes the token sequence autoregressively. Stage 1's frames are forced in as position
-tokens, so the decoder only chooses left note, right note or empty at each one. Every logit passes
-through these rules first:
+tokens (rules), so at each frame the decoder chooses, for each hand, a note (cell and cut direction)
+or nothing. Before sampling, every score passes through the rules below. All of them are
+hand-written. Hard rules hold whatever the model predicts; soft rules can be outweighed by a strong
+model preference:
 
 | Rule | Kind | Why |
 |---|---|---|
@@ -111,18 +188,24 @@ through these rules first:
 | Saber arc | soft | `--flow-penalty`: the cheap next cut continues the hand's follow-through from its last note. |
 | Doubles | soft | `--doubles-bias` raises both-hands-at-once notes toward the reference rate. |
 
-## Stage 3: trimming
+## Stage 3: trimming (rules)
 
 `generate_full_song` in `beat_weaver/model/inference.py`
+
+**Driven by: rules.** Windowing, stitching and trimming are plain code around the model's output.
 
 Long songs are generated in overlapping windows and stitched at the overlap midpoint. Then:
 
 - **Lead-in:** no notes in the first `--lead-in` seconds (default 2).
 - **Tail:** no notes after the audio goes quiet for good, found from the waveform's loudness.
 
-## Choosing the best map: beat_sim
+## Choosing the best map: beat_sim (rules)
 
 `beat_sim/`, documented in [beat_sim/README.md](beat_sim/README.md)
+
+**Driven by: rules.** There is no neural network in the evaluator or the mapper. Some thresholds were
+measured from reference maps (the bands, the speed caps), so they are calibrated from data but
+fixed. Nothing is trained.
 
 Generation is stochastic, so the system makes several candidates and scores them.
 
@@ -133,10 +216,14 @@ Generation is stochastic, so the system makes several candidates and scores them
 - **Music fit (`music.py`):** whether note density per bar follows the song's loudness, and the
   share of notes on an audio onset. Needs ffmpeg and the song file.
 - **Body (`body.py`, `ik.py`, `planner.py`, `metrics.py`):** a two-arm kinematic skeleton with
-  joint limits. It solves inverse kinematics per note, interpolates smooth swings, and flags
+  joint limits. It solves inverse kinematics per note (a numerical optimization, not a learned
+  policy), interpolates smooth swings, and flags
   transitions faster than anything in the reference maps. It only subtracts points; it never adds
   them.
 - **Composite:** the rhythm score is the grade, minus body penalties.
+- **Map metadata (`meta.py`):** title and artist from the audio file's tags or its file name, the
+  mapper name from your own config file, a preview from the loudest ten seconds, a cover if the file
+  has one. File-name parsing uses regular expressions, not a model.
 
 Three entry points:
 
@@ -161,13 +248,16 @@ models/
 ```
 
 `current` is the stable name. To promote a new model, add a versioned folder and repoint the link.
-Training checkpoints with optimizer state stay under `output/`.
+Training checkpoints with optimizer state stay under `output/`. The weights are not in git: see
+[TRAINING.md](TRAINING.md) to produce them.
 
 ## How this fork differs from upstream
 
 Upstream is a complete, working single-stage system: the decoder generates timing and placement
 together from the audio, and maps are produced with one `generate` call. This fork keeps its data
-pipeline, tokenizer layout, encoder and decoder, and changes how they are trained and used.
+pipeline, tokenizer layout, encoder and decoder, and changes how they are trained and used. The
+effect is that more of the decisions are made by hand-written code: density, rests and streams,
+playability, trimming, selection and metadata all moved out of the model.
 
 ### Why it changed
 
@@ -207,6 +297,7 @@ with the fork's grammar fixes and masks applied.
 
 ## Where to read more
 
+- [TRAINING.md](TRAINING.md): how to train the model, step by step, in the order that produced the production model.
 - [beat_sim/README.md](beat_sim/README.md): evaluator, loop and mapper details, calibration.
 - [CODEBASE_REFERENCE.md](CODEBASE_REFERENCE.md): module-by-module reference (upstream).
 - [RESEARCH.md](RESEARCH.md): map format and model research (upstream, extended).

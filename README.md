@@ -45,7 +45,7 @@ pip install -e ".[ml,dev]"
 
 ## Quick Start: Training a Model
 
-This is the end-to-end workflow from a fresh clone to a trained model.
+This is the end-to-end workflow from a fresh clone to a trained model. The production recipe is in [TRAINING.md](TRAINING.md).
 
 ### Step 1: Download training data
 
@@ -58,7 +58,7 @@ beat-weaver download --min-score 0.75 --output data/raw/beatsaver
 
 ### Step 2: Extract official maps (optional)
 
-If you have Beat Saber installed via Steam, you can also extract the 214 official/DLC maps. These are higher quality and weighted at 20% of each training batch.
+If you have Beat Saber installed via Steam, you can also extract the 214 official/DLC maps. These are higher quality and are sampled at a fixed share of each training batch (20% in the default configs, 10% in the production config).
 
 ```bash
 # Windows (default Steam path)
@@ -86,7 +86,9 @@ beat-weaver build-manifest --input data/raw --output data/audio_manifest.json
 
 ### Step 5: Train the model
 
-Choose a config based on your hardware:
+This trains a single-stage model, the original upstream recipe. To reproduce the model that the two-stage
+generator uses (main run, then a placement fine-tune on a favourites-weighted mix), follow
+**[TRAINING.md](TRAINING.md)** instead. Choose a config based on your hardware:
 
 | Config | Params | VRAM | File |
 |--------|--------|------|------|
@@ -134,7 +136,13 @@ beat-weaver train \
 
 ### Step 7: Generate a map
 
-The production model lives at `models/current` (a link to the current versioned model folder; see [ARCHITECTURE.md](ARCHITECTURE.md#where-the-model-lives)). Always use `--two-stage`.
+Generation needs a trained model. **The weights are not in this repository.** Either train one
+(see **[TRAINING.md](TRAINING.md)** for the full recipe) or copy an existing model folder. The commands
+below use `models/current`, a folder holding `model.pt` and `config.json`, or a link to one. See
+[ARCHITECTURE.md](ARCHITECTURE.md#where-the-model-lives) for how the production model is laid out.
+If you just trained with Step 5, the single-stage checkpoint is `output/training/checkpoints/best`,
+and you can generate with it by dropping `--two-stage`. For the best maps, use the two-stage model
+from TRAINING.md and always pass `--two-stage`.
 
 ```bash
 # Best results: candidates for every difficulty, scored, best kept, merged into one map folder
@@ -160,7 +168,7 @@ beat-weaver generate \
   --output my_map/
 ```
 
-Recommended flags per difficulty are in `models/current/generation.json`. To use a checkpoint you just trained instead, pass `--checkpoint output/training/checkpoints/best`.
+Recommended flags per difficulty are in `generation.json` beside the production model's weights (if you have that folder), and are also the presets in `beat_sim/mapper.py`. To use a checkpoint you just trained instead, pass `--checkpoint output/training/checkpoints/best`.
 
 The output folder can be copied directly to `Beat Saber_Data/CustomLevels/` to play in-game.
 
