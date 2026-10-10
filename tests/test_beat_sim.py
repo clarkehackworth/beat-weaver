@@ -84,3 +84,11 @@ def test_ladder_forces_rising_density_and_prefers_total_score():
     assert (got["Hard"][0], got["Expert"][0]) in {(80, 93), (89, 79)}  # either feasible chain; the DP takes the larger total
     assert got["Hard"][0] + got["Expert"][0] == 173
     assert pick_ladder({"Easy": [c(70, 1.0)]})["Easy"][0] == 70
+
+
+def test_mapper_expertplus_candidates_can_use_beat_focus():
+    from beat_sim.mapper import flags_for
+
+    assert "--beat-focus" in flags_for("ExpertPlus", 4.2, 0, True)
+    assert "--beat-focus" not in flags_for("ExpertPlus", 4.2, 1, False)
+    assert "--seed 1" in flags_for("Expert", 3.3, 1)

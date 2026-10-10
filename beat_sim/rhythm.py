@@ -14,7 +14,8 @@ import numpy as np
 from beat_weaver.schemas.normalized import Note
 
 # (p10, p90) per metric over 535 favourite + 303 official map folders, Standard characteristic (python -m beat_sim.calibrate_bands).
-# Music metrics and lead_in come from the audio subset of the favourites (calibrate_music). from "Beat Saber Favorites-2026.10.05".
+# Music metrics and lead_in: 431 Expert / 390 Expert+ favourite + official difficulties with audio (calibrate_music),
+# measured with the per-note nearest-onset metric; Easy-Hard reuse the Expert values. from "Beat Saber Favorites-2026.10.05".
 # Regenerate with `python -m beat_sim.calibrate <favourites folder>`.
 BANDS = {
     'Easy': {  # 367 maps
@@ -35,9 +36,9 @@ BANDS = {
         'outer_cols': (0.287, 0.465),
         'far_cross': (0.000, 0.010),
         'updown': (0.590, 0.819),
-        'energy_corr': (0.32, 1.0),
-        'onset_hit': (0.42, 1.0),
-        'lead_in': (1.7, 12.0),
+        'energy_corr': (0.289, 1.0),
+        'onset_hit': (0.624, 1.0),
+        'lead_in': (1.6, 7.4),
     },
     'Normal': {  # 425 maps
         'converging': (0.000, 0.000),
@@ -57,9 +58,9 @@ BANDS = {
         'outer_cols': (0.308, 0.497),
         'far_cross': (0.000, 0.031),
         'updown': (0.565, 0.833),
-        'energy_corr': (0.32, 1.0),
-        'onset_hit': (0.42, 1.0),
-        'lead_in': (1.7, 12.0),
+        'energy_corr': (0.289, 1.0),
+        'onset_hit': (0.624, 1.0),
+        'lead_in': (1.6, 7.4),
     },
     'Hard': {  # 508 maps
         'converging': (0.000, 0.003),
@@ -79,9 +80,9 @@ BANDS = {
         'outer_cols': (0.336, 0.530),
         'far_cross': (0.000, 0.036),
         'updown': (0.520, 0.843),
-        'energy_corr': (0.32, 1.0),
-        'onset_hit': (0.42, 1.0),
-        'lead_in': (1.7, 12.0),
+        'energy_corr': (0.289, 1.0),
+        'onset_hit': (0.624, 1.0),
+        'lead_in': (1.6, 7.4),
     },
     'Expert': {  # 644 maps
         'converging': (0.000, 0.005),
@@ -101,9 +102,9 @@ BANDS = {
         'outer_cols': (0.365, 0.538),
         'far_cross': (0.000, 0.050),
         'updown': (0.447, 0.797),
-        'energy_corr': (0.32, 1.0),
-        'onset_hit': (0.42, 1.0),
-        'lead_in': (1.7, 12.0),
+        'energy_corr': (0.289, 1.0),
+        'onset_hit': (0.624, 1.0),
+        'lead_in': (1.6, 7.4),
     },
     'ExpertPlus': {  # 577 maps
         'converging': (0.000, 0.004),
@@ -123,9 +124,9 @@ BANDS = {
         'outer_cols': (0.399, 0.547),
         'far_cross': (0.000, 0.088),
         'updown': (0.359, 0.752),
-        'energy_corr': (0.28, 1.0),
-        'onset_hit': (0.4, 1.0),
-        'lead_in': (1.7, 11.0),
+        'energy_corr': (0.286, 1.0),
+        'onset_hit': (0.621, 1.0),
+        'lead_in': (1.6, 6.5),
     },
 }
 

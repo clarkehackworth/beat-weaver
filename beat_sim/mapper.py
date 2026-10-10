@@ -35,7 +35,7 @@ PRESET = {
     "Normal":     dict(min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
     "Hard":       dict(min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
     "Expert":     dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
-    "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=0.8),
+    "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
 }
 DOUBLES_FRACTION = {"Easy": 0.10, "Normal": 0.15, "Hard": 0.20, "Expert": 0.25, "ExpertPlus": 0.25}
 DENSITY_VARIANTS = (0.85, 1.15)  # ponytail: two hedges around the preset; widen if winners sit at an edge
@@ -46,9 +46,9 @@ def target_nps(diff: str) -> float:
     return (lo + hi) / 2 / (1 + DOUBLES_FRACTION[diff])
 
 
-def flags_for(diff: str, nps: float, seed: int) -> str:
+def flags_for(diff: str, nps: float, seed: int, beat_focus: bool = False) -> str:
     p = PRESET[diff]
-    return (f"--two-stage --notes-per-second {nps:.2f} --min-gap {p['min_gap']} --doubles-bias {p['doubles_bias']} "
+    return (("--beat-focus " if beat_focus else "") + f"--two-stage --notes-per-second {nps:.2f} --min-gap {p['min_gap']} --doubles-bias {p['doubles_bias']} "
             f"--flow-penalty {p['flow_penalty']} --dynamics {p['dynamics']} --vision-penalty {p['vision_penalty']} "
             f"--stream-bias {p['stream_bias']} --seed {seed}")
 
@@ -147,13 +147,16 @@ def main() -> None:
             for i in range(args.candidates):
                 seed, variant = divmod(i, len(DENSITY_VARIANTS))
                 nps = base * DENSITY_VARIANTS[variant]
-                name = f"{diff}__nps{nps:.2f}__s{seed}"
+                # Expert+ alternates beat focus by seed: it puts rests between streams (r9: in-band longest run
+                # 6/6 vs 2/6) but can push a song's streams above the band, so let the scorer choose per song.
+                focus = diff == "ExpertPlus" and seed % 2 == 0
+                name = f"{diff}__nps{nps:.2f}__s{seed}" + ("__focus" if focus else "")
                 if (work / name / "Info.dat").exists():
                     continue
                 out_dir = f"{REMOTE_ROOT}/{stem}_candidates/{name}"
                 cmd = (f"cd /data && {ENV} python -m beat_weaver.cli generate --checkpoint {args.checkpoint} "
                        f"--audio {REMOTE_ROOT}/{shlex.quote(remote_song)} --difficulty {diff} --output {out_dir} "
-                       f"{flags_for(diff, nps, seed)}")
+                       f"{flags_for(diff, nps, seed, focus)}")
                 print(f"generate {name} ...", end="", flush=True)
                 log = remote(cmd)
                 print(" " + (log.strip().splitlines() or ["done"])[-1])

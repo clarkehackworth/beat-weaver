@@ -92,6 +92,29 @@ def fetch(remote_dir: str, local_dir: Path) -> None:
         tf.extractall(local_dir.parent, filter="data")
 
 
+def score_folder(folder: str, name: str, cell: str, song: str, seed: int, difficulty: str) -> tuple[dict | None, str]:
+    """Score one generated map (runs in a worker process). Returns (csv row or None, printable line)."""
+    from beat_weaver.parsers.beatmap_parser import parse_map_folder
+
+    folder_p = Path(folder)
+    bms = [b for b in parse_map_folder(folder_p) if b.difficulty_info.difficulty.lower() == difficulty.lower()]
+    if not bms:
+        return None, ""
+    bm = bms[0]
+    ev = evaluate(bm.notes, bm.metadata.bpm, bm.difficulty_info.difficulty, audio=find_audio(folder_p))
+    (folder_p / "report.json").write_text(json.dumps(to_dict(ev), indent=2))
+    r, b = ev["rhythm"], ev["body"]
+    row = {"cell": cell, "song": song, "seed": seed, "composite": round(ev["composite"], 1),
+           "rhythm": round(r.score, 1), "body": round(b.score, 1),
+           **{k: round(v, 3) for k, v in r.stats.items()},
+           "too_fast": b.left.too_fast + b.right.too_fast, "resets": b.left.resets + b.right.resets,
+           "out_of_band": ",".join(k for k, ok in r.in_band.items() if not ok)}
+    music = f" music={r.stats['energy_corr']:.2f}/{r.stats['onset_hit']:.2f}" if "energy_corr" in r.stats else ""
+    line = (f"{name:40s} composite={ev['composite']:5.1f} rhythm={r.score:5.1f} body={b.score:5.1f} "
+            f"nps={r.stats['nps']:.2f} streams={r.stats['streams_per_min']:.1f}/min{music}")
+    return row, line
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tag", required=True, help="run name; folder under /data/generate and ~/Downloads")
@@ -102,6 +125,7 @@ def main() -> None:
     ap.add_argument("--difficulty", default="Expert")
     ap.add_argument("--no-sync", action="store_true", help="skip pushing local code to the container")
     ap.add_argument("--score-only", action="store_true", help="don't generate; rescore what is already in ~/Downloads/<tag>")
+    ap.add_argument("--workers", type=int, default=12, help="parallel scoring processes")
     ap.add_argument("--seeds", type=int, default=1, help="generate each cell this many times (seeds 0..N-1) and average")
     args = ap.parse_args()
 
@@ -131,31 +155,27 @@ def main() -> None:
                     print(" " + (log.strip().splitlines() or ["done"])[-1])
                     fetch(out_dir, local_root / name)
 
-    from beat_weaver.parsers.beatmap_parser import parse_map_folder
-
-    rows = []
+    jobs = []
     for cell in cells:
         for song in args.songs:
             for seed in seeds:
                 name = f"{song}__{cell_name(cell)}" + (f"__s{seed}" if len(seeds) > 1 else "")
-                folder = local_root / name
-                if not folder.exists():
-                    continue
-                bms = [b for b in parse_map_folder(folder) if b.difficulty_info.difficulty.lower() == args.difficulty.lower()]
-                if not bms:
-                    continue
-                bm = bms[0]
-                ev = evaluate(bm.notes, bm.metadata.bpm, bm.difficulty_info.difficulty, audio=find_audio(folder))
-                (folder / "report.json").write_text(json.dumps(to_dict(ev), indent=2))
-                r, b = ev["rhythm"], ev["body"]
-                rows.append({"cell": cell_name(cell), "song": song, "seed": seed, "composite": round(ev["composite"], 1),
-                             "rhythm": round(r.score, 1), "body": round(b.score, 1),
-                             **{k: round(v, 3) for k, v in r.stats.items()},
-                             "too_fast": b.left.too_fast + b.right.too_fast, "resets": b.left.resets + b.right.resets,
-                             "out_of_band": ",".join(k for k, ok in r.in_band.items() if not ok)})
-                music = f" music={r.stats['energy_corr']:.2f}/{r.stats['onset_hit']:.2f}" if "energy_corr" in r.stats else ""
-                print(f"{name:40s} composite={ev['composite']:5.1f} rhythm={r.score:5.1f} body={b.score:5.1f} "
-                      f"nps={r.stats['nps']:.2f} streams={r.stats['streams_per_min']:.1f}/min{music}")
+                if (local_root / name).exists():
+                    jobs.append((str(local_root / name), name, cell_name(cell), song, seed, args.difficulty))
+
+    # The body simulation takes minutes per 1000-note map, so score maps in parallel processes.
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    rows = []
+    with ProcessPoolExecutor(max_workers=min(args.workers, max(len(jobs), 1))) as ex:
+        futs = [ex.submit(score_folder, *j) for j in jobs]
+        for fut in as_completed(futs):
+            row, line = fut.result()
+            if row:
+                rows.append(row)
+                print(line, flush=True)
+    order = {(j[2], j[3], j[4]): i for i, j in enumerate(jobs)}
+    rows.sort(key=lambda r: order[(r["cell"], r["song"], r["seed"])])
 
     if not rows:
         return
