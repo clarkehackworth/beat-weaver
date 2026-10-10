@@ -124,7 +124,43 @@ def detect_bpm(
     tempo = float(tempo)
     if tempo <= 0:
         return default
-    return tempo
+    return refine_bpm(audio, sr, tempo)
+
+
+def refine_bpm(audio: np.ndarray, sr: int, tempo: float, span: float = 1.5, step: float = 0.05, hop: int = 220,
+               min_gain: float = 1.05) -> float:
+    """Snap a rough tempo to the candidate within +-span BPM whose beat grid locks tightest to the audio.
+
+    Beat trackers are often off by a fraction of a BPM (80.7 for an 80.0 song), and a
+    0.7 BPM error walks the beat grid through a full beat every ~85 s, so by mid-song
+    every bar is phase-shifted. Score = how concentrated the onset energy is when binned by
+    phase within the beat (sum of squared bin shares, 32 bins), over the whole song. Concentration
+    is far more sensitive than max/mean with few bins: neighbouring tempos 0.1 BPM apart separate
+    clearly. Ties go to the candidate nearest a whole number.
+    """
+    n = len(audio) // hop
+    if n < 10:
+        return tempo
+    rms = np.sqrt((audio[: n * hop].astype(np.float32).reshape(n, hop) ** 2).mean(axis=1))
+    d = np.clip(np.diff(np.log1p(rms * 100), prepend=0.0), 0, None)
+    t = np.arange(n) * hop / sr
+    bins = 32
+
+    def lock(cand: float) -> float:
+        beat = 60.0 / cand
+        ph = ((t % beat) / beat * bins).astype(int) % bins
+        share = np.bincount(ph, weights=d, minlength=bins)
+        share = share / max(share.sum(), 1e-9)
+        return float((share**2).sum()) - 1e-4 * abs(cand - round(cand))  # tie-break toward integers
+
+    cands = np.arange(tempo - span, tempo + span + 1e-9, step)
+    best = max(cands, key=lock)
+    # Only move the tempo when the lock is clearly sharper than the detector's own value. Songs
+    # without a steady pulse give a flat, noisy score where "best" is arbitrary (measured: sawadika
+    # and In The End gain 0.1-0.2%, lying 12.7%), so the detector's tempo is kept there.
+    if lock(best) < min_gain * lock(tempo):
+        return tempo
+    return float(round(best, 2))
 
 
 def compute_onset_envelope(

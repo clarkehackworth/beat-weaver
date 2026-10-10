@@ -6,7 +6,7 @@ torch = pytest.importorskip("torch")
 
 from beat_weaver.model.config import ModelConfig
 from beat_weaver.model.inference import (
-    _build_grammar_mask, _crossover_outward_tokens, generate, generate_full_song,
+    _build_grammar_mask, _crossover_outward_tokens, _decode_note_token, generate, generate_full_song,
 )
 from beat_weaver.model.tokenizer import (
     BAR_BASE,
@@ -88,19 +88,21 @@ class TestGrammarMask:
         # without the cell the full set is allowed (LEFT_EMPTY case)
         assert _build_grammar_mask(LEFT_EMPTY)[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 18
 
-    def test_same_direction_penalty_geometry(self):
-        from beat_weaver.model.inference import _same_direction_penalty
+    def test_arc_penalty_geometry(self):
+        from beat_weaver.model.inference import _arc_penalty
         from beat_weaver.model.tokenizer import _encode_note_token
-        pen = _same_direction_penalty(LEFT_BASE, 1)             # previous cut: down
-        assert pen[_encode_note_token(LEFT_BASE, 0, 0, 1)] == 1.0  # down again: full penalty
-        assert pen[_encode_note_token(LEFT_BASE, 0, 0, 0)] == 0.0  # up: flows, no penalty
-        assert pen[_encode_note_token(LEFT_BASE, 0, 0, 2)] == 0.0  # left: perpendicular
-        assert 0.6 < pen[_encode_note_token(LEFT_BASE, 0, 0, 6)] < 0.8  # down-left: partial
-        assert pen[_encode_note_token(LEFT_BASE, 0, 0, 8)] == 0.0  # any-direction: never penalised
-        assert pen[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == 0   # other hand untouched
+        tok = lambda x, y, d: _encode_note_token(LEFT_BASE, x, y, d)
+        pen = _arc_penalty(LEFT_BASE, (1, 1), 1)                 # just cut DOWN through the centre-left cell
+        assert pen[tok(1, 1, 1)] > 0.99                            # down again on the same cell: full penalty
+        assert pen[tok(1, 1, 0)] < 0.01                            # up: reverses, free
+        assert abs(pen[tok(1, 1, 2)] - 0.5) < 1e-6                 # left: perpendicular, half
+        assert abs(pen[tok(1, 1, 8)] - 0.5) < 1e-6                 # dot: neutral
+        # hand is now below (1,1); a note at (3,2) is up-right of it, so up-right is the arc
+        assert pen[tok(3, 2, 5)] < pen[tok(3, 2, 3)] < pen[tok(3, 2, 6)]
+        assert pen[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == 0  # other hand untouched
         assert pen[:LEFT_BASE].sum() == 0
-        assert _same_direction_penalty(LEFT_BASE, 8).sum() == 0     # after an any-cut: nothing
-        assert _same_direction_penalty(LEFT_BASE, -1).sum() == 0    # no previous cut
+        assert _arc_penalty(LEFT_BASE, (1, 1), 8).sum() == 0       # after an any-cut: nothing
+        assert _arc_penalty(LEFT_BASE, None, 1).sum() == 0         # no previous cut
 
     def test_bars_are_sequential_and_bounded(self):
         """Exactly one bar token is ever allowed: current_bar + 1, and none past the window."""
@@ -331,6 +333,193 @@ class TestGenerateFullSong:
         r0, n0 = repeat_rate(0.0); r1, n1 = repeat_rate(50.0)
         assert n0 > 50 and n1 > 50
         assert r1 < r0 * 0.5, (r0, r1)
+
+    def test_dynamics_shapes_budget_to_the_onset_head(self, small_model):
+        from beat_weaver.model.inference import _onset_schedule
+        model, config = small_model
+        n = 4 * 64
+        # bar 0 silent, bar 3 loud, bars 1-2 average
+        high = [f for f in range(3 * 64, 4 * 64, 2)] + [f for f in range(64, 3 * 64, 4)]
+        model.onset_head = self._fixed_onset_head(high, n)
+        memory = torch.zeros(1, n, config.encoder_dim)
+        flat = _onset_schedule(model, memory, n, notes_per_beat=1.0, min_gap=2, dynamics=0.0)
+        shaped = _onset_schedule(model, memory, n, notes_per_beat=1.0, min_gap=2, dynamics=1.0)
+        per_bar = lambda s: [sum(1 for f in s if f // 64 == b) for b in range(4)]
+        assert per_bar(flat) == [4, 4, 4, 4], per_bar(flat)
+        pb = per_bar(shaped)
+        assert pb[0] == 0 and pb[3] > pb[1] >= 1, pb
+        assert abs(sum(pb) - sum(per_bar(flat))) <= 2, "density is preserved overall"
+
+    def test_lead_in_drops_opening_notes(self, small_model):
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        notes = generate_full_song(model, mel, "Expert", config, 120.0, seed=1, two_stage=True,
+                                   notes_per_beat=2.0, lead_in_seconds=3.0)
+        assert notes and min(n.time_seconds for n in notes) >= 3.0
+        notes0 = generate_full_song(model, mel, "Expert", config, 120.0, seed=1, two_stage=True,
+                                    notes_per_beat=2.0, lead_in_seconds=0.0)
+        assert min(n.time_seconds for n in notes0) < 3.0
+
+    def test_stream_bias_chains_hot_frames_into_runs(self, small_model):
+        from beat_weaver.model.inference import _onset_schedule
+        model, config = small_model
+        n = 2 * 64
+        model.onset_head = self._fixed_onset_head(list(range(16, 48)), n)  # beats 2-3 of bar 0 are hot, every frame
+        memory = torch.zeros(1, n, config.encoder_dim)
+        off = _onset_schedule(model, memory, n, notes_per_beat=2.0, min_gap=4, dynamics=0.0, stream_bias=1.0)
+        on = _onset_schedule(model, memory, n, notes_per_beat=2.0, min_gap=4, dynamics=0.0, stream_bias=0.5)
+        def longest(sched):
+            best = run = 1
+            for a, b in zip(sched, sched[1:]):
+                run = run + 1 if b - a == 4 else 1
+                best = max(best, run)
+            return best
+        assert len(on) == len(off), "budget unchanged"
+        assert longest(on) >= 6 > longest(off), (longest(on), longest(off))
+
+    def test_stream_chains_stop_at_the_beat_boundary(self, small_model):
+        from beat_weaver.model.inference import _onset_schedule
+        model, config = small_model
+        n = 64
+        model.onset_head = self._fixed_onset_head(list(range(0, 64)), n)  # whole bar hot
+        memory = torch.zeros(1, n, config.encoder_dim)
+        sched = _onset_schedule(model, memory, n, notes_per_beat=2.0, min_gap=4, dynamics=0.0, stream_bias=0.5)
+        per_beat = [sum(1 for f in sched if f // 16 == b) for b in range(4)]
+        assert min(per_beat) >= 1 and per_beat[0] <= len(sched) // 2, per_beat
+
+    def test_bar_remainder_goes_to_the_strongest_beats(self, small_model):
+        from beat_weaver.model.inference import _onset_schedule
+        model, config = small_model
+        n = 64
+        model.onset_head = self._fixed_onset_head(list(range(32, 48)), n)  # beat 3 hot
+        memory = torch.zeros(1, n, config.encoder_dim)
+        sched = _onset_schedule(model, memory, n, notes_per_beat=1.5, min_gap=2, dynamics=0.0)  # 6 notes: 2,2,1,1 split
+        per_beat = [sum(1 for f in sched if f // 16 == b) for b in range(4)]
+        assert sum(per_beat) == 6 and per_beat[2] == 2 and min(per_beat) >= 1, per_beat
+
+    def test_converging_mask_geometry(self):
+        from beat_weaver.model.inference import _converging_right_tokens
+        from beat_weaver.model.tokenizer import _encode_note_token
+        tok = lambda x, y, d: _encode_note_token(RIGHT_BASE, x, y, d)
+        m = _converging_right_tokens((1, 1), 3)  # left note at (1,1) cutting RIGHT
+        assert m[tok(2, 1, 2)], "right note just to its right cutting LEFT: blades meet"
+        assert not m[tok(2, 1, 3)], "both cutting right: fine"
+        assert not m[tok(2, 1, 0)] and not m[tok(2, 1, 1)], "perpendicular: fine"
+        assert not m[tok(3, 1, 2)], "two cells away: not adjacent, allowed"
+        assert m[tok(1, 1, 0)] and m[tok(1, 1, 3)] and not m[tok(1, 1, 8)], "same cell: any directional cut blocked, dot ok"
+        assert not m[tok(0, 1, 3)], "behind the left cut: fine"
+        m2 = _converging_right_tokens((1, 1), 0)  # left cutting UP
+        assert m2[tok(1, 2, 1)] and m2[tok(2, 2, 6)] and not m2[tok(2, 2, 0)]
+        assert _converging_right_tokens((1, 1), 8).sum() == 0
+
+    def test_near_converging_is_blocked_by_default_and_allowed_by_flag(self):
+        from beat_weaver.model.inference import _converging_right_tokens
+        from beat_weaver.model.tokenizer import _encode_note_token
+        tok = lambda x, y, d: _encode_note_token(RIGHT_BASE, x, y, d)
+        # left at (1,1) cutting UP; right beside it at (2,1) cutting DOWN-LEFT: 135 deg apart, right aimed at left
+        near = tok(2, 1, 6)
+        assert _converging_right_tokens((1, 1), 0)[near]
+        assert not _converging_right_tokens((1, 1), 0, block_near=False)[near]
+        assert _converging_right_tokens((1, 1), 3, block_near=False)[tok(2, 1, 2)], "head-on stays blocked either way"
+        assert not _converging_right_tokens((1, 1), 3)[tok(2, 1, 1)], "90 deg apart is not a near miss"
+        assert not _converging_right_tokens((1, 1), 3)[tok(3, 1, 6)], "two cells away is fine"
+        # neither aimed at the other: left at (1,1) cutting LEFT, right at (2,1) cutting UP-RIGHT, 135 apart but diverging
+        assert not _converging_right_tokens((1, 1), 2)[tok(2, 1, 5)]
+
+    def test_no_converging_doubles_are_generated(self, small_model):
+        from beat_weaver.model.inference import _converging_right_tokens
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        for seed in range(10):
+            toks = generate(model, mel, "Expert", config, seed=seed, temperature=2.0, audio_bars=2, doubles_bias=20.0)
+            for a, b in zip(toks, toks[1:]):
+                if LEFT_BASE <= a < LEFT_BASE + LEFT_COUNT and RIGHT_BASE <= b < RIGHT_BASE + RIGHT_COUNT:
+                    x, y, d = _decode_note_token(a, LEFT_BASE)
+                    assert not _converging_right_tokens((x, y), d)[b], (seed, a, b)
+
+    def test_vision_cap_never_stacks_centre_notes(self, small_model):
+        from beat_weaver.model.inference import VISION_CELLS
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        worst = 0
+        for seed in range(10):
+            toks = generate(model, mel, "Expert", config, seed=seed, temperature=2.0, audio_bars=2,
+                            vision_penalty=0.0, vision_max_run=2)
+            run = 0
+            hit_vis = False
+            for t in toks:
+                if POS_BASE <= t < POS_BASE + POS_COUNT:
+                    run = run + 1 if hit_vis else 0
+                    worst = max(worst, run)
+                    hit_vis = False
+                elif LEFT_BASE <= t < LEFT_BASE + LEFT_COUNT:
+                    hit_vis |= _decode_note_token(t, LEFT_BASE)[:2] in VISION_CELLS
+                elif RIGHT_BASE <= t < RIGHT_BASE + RIGHT_COUNT:
+                    hit_vis |= _decode_note_token(t, RIGHT_BASE)[:2] in VISION_CELLS
+        assert worst <= 2, worst
+
+    def test_vision_penalty_lowers_centre_rate(self, small_model):
+        from beat_weaver.model.inference import VISION_CELLS
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        def rate(pen):
+            c = n = 0
+            for seed in range(10):
+                for t in generate(model, mel, "Expert", config, seed=seed, temperature=2.0, audio_bars=2, vision_penalty=pen, vision_max_run=0):
+                    for base, cnt in ((LEFT_BASE, LEFT_COUNT), (RIGHT_BASE, RIGHT_COUNT)):
+                        if base <= t < base + cnt:
+                            n += 1; c += _decode_note_token(t, base)[:2] in VISION_CELLS
+            return c / max(n, 1)
+        assert rate(8.0) < rate(0.0) * 0.5
+
+    def test_doubles_bias_raises_double_rate(self, small_model):
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        def rate(bias):
+            d = tot = 0
+            for seed in range(12):
+                toks = generate(model, mel, "Expert", config, seed=seed, temperature=1.5, audio_bars=2, doubles_bias=bias)
+                for a, b in zip(toks, toks[1:]):
+                    if LEFT_BASE <= a < LEFT_BASE + LEFT_COUNT:
+                        tot += 1; d += RIGHT_BASE <= b < RIGHT_BASE + RIGHT_COUNT
+            return d / max(tot, 1), tot
+        r0, n0 = rate(0.0); r1, n1 = rate(20.0)
+        assert n0 > 20 and r1 >= r0 and r1 == 1.0, (r0, r1)
+
+    def test_beat_focus_leaves_weak_beats_with_one_note(self, small_model):
+        from beat_weaver.model.inference import _onset_schedule
+        model, config = small_model
+        n = 64
+        hot = list(range(0, 16)) + list(range(32, 48))  # beats 1 and 3 hot
+        model.onset_head = self._fixed_onset_head(hot, n)
+        memory = torch.zeros(1, n, config.encoder_dim)
+        even = _onset_schedule(model, memory, n, notes_per_beat=2.5, min_gap=4, dynamics=0.0)
+        focus = _onset_schedule(model, memory, n, notes_per_beat=2.5, min_gap=4, dynamics=0.0, beat_focus=True)
+        per = lambda sc: [sum(1 for f in sc if f // 16 == b) for b in range(4)]
+        assert len(even) == len(focus) == 10
+        assert min(per(focus)) == 1 and max(per(focus)) == 4, per(focus)
+        assert max(per(even)) - min(per(even)) <= 1, per(even)
+
+    def test_notes_per_second_overrides_notes_per_beat(self, small_model):
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        slow = generate_full_song(model, mel, "Expert", config, 60.0, seed=1, two_stage=True, notes_per_second=4.0, lead_in_seconds=0)
+        fast = generate_full_song(model, mel, "Expert", config, 180.0, seed=1, two_stage=True, notes_per_second=4.0, lead_in_seconds=0)
+        per_beat = lambda ns, bpm: len(ns) / (max(n.beat for n in ns) + 1)
+        assert per_beat(slow, 60) > 2 * per_beat(fast, 180), (per_beat(slow, 60), per_beat(fast, 180))
+
+    def test_end_seconds_drops_notes_after_the_music(self, small_model):
+        import numpy as np
+        from beat_weaver.model.inference import last_music_second
+        sr = 22050
+        audio = np.concatenate([np.random.default_rng(0).standard_normal(5 * sr) * 0.3, np.zeros(3 * sr)]).astype(np.float32)
+        end = last_music_second(audio, sr)
+        assert 4.9 <= end <= 5.2, end
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        notes = generate_full_song(model, mel, "Expert", config, 120.0, seed=1, two_stage=True, notes_per_beat=2.0,
+                                   lead_in_seconds=0.0, end_seconds=end)
+        assert notes and max(n.time_seconds for n in notes) < end
 
     @staticmethod
     def _fixed_onset_head(frames_high, n_frames):

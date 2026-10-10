@@ -193,3 +193,23 @@ class TestMelWithOnset:
         aligned = beat_align_spectrogram(mel, sr=sr, hop_length=512, bpm=120.0)
         assert aligned.shape[0] == 81  # n_mels+1 preserved
         assert aligned.shape[1] > 0
+
+
+def test_refine_bpm_snaps_to_the_true_tempo():
+    import numpy as np
+    from beat_weaver.model.audio import refine_bpm
+    sr = 22050
+    audio = np.zeros(60 * sr, dtype=np.float32)
+    for k in range(80):  # clicks at exactly 80 BPM
+        s = int(k * 0.75 * sr)
+        audio[s: s + 300] = 0.8
+    assert abs(refine_bpm(audio, sr, 80.7) - 80.0) < 0.06
+
+
+def test_refine_bpm_leaves_an_unclear_tempo_alone():
+    import numpy as np
+    from beat_weaver.model.audio import refine_bpm
+    rng = np.random.default_rng(0)
+    sr = 22050
+    audio = (rng.standard_normal(60 * sr) * 0.1).astype(np.float32)  # noise: no pulse to lock to
+    assert refine_bpm(audio, sr, 123.4) == 123.4
