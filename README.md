@@ -15,6 +15,9 @@ Beat Weaver uses machine learning to automatically generate [Beat Saber](https:/
 - **Seeded generation** — use a fixed seed for repeatable tracks, or randomize for variety
 - **Grammar-constrained decoding** — generated maps always follow valid Beat Saber structure
 - **Quality metrics** — onset F1, parity violations, NPS accuracy, beat alignment, pattern diversity
+- **Song in, best map out** — `python -m beat_sim.mapper song.mp3` generates candidates for every difficulty, scores them against reference maps and a kinematic body simulation, and keeps the best set
+
+See **[ARCHITECTURE.md](ARCHITECTURE.md)** for how it works and how this fork differs from upstream.
 
 ## Requirements
 
@@ -131,23 +134,33 @@ beat-weaver train \
 
 ### Step 7: Generate a map
 
+The production model lives at `models/current` (a link to the current versioned model folder; see [ARCHITECTURE.md](ARCHITECTURE.md#where-the-model-lives)). Always use `--two-stage`.
+
 ```bash
-# BPM is auto-detected from the audio
+# Best results: candidates for every difficulty, scored, best kept, merged into one map folder
+python -m beat_sim.mapper song.mp3
+python -m beat_sim.mapper song.mp3 --difficulties Expert ExpertPlus --candidates 6
+
+# One map, one difficulty (BPM auto-detected)
 beat-weaver generate \
-  --checkpoint output/training/checkpoints/best \
+  --checkpoint models/current \
   --audio song.ogg \
-  --difficulty Expert \
+  --difficulty ExpertPlus \
+  --two-stage \
   --output my_map/
 
 # With explicit BPM and seed for reproducibility
 beat-weaver generate \
-  --checkpoint output/training/checkpoints/best \
+  --checkpoint models/current \
   --audio song.ogg \
   --difficulty ExpertPlus \
+  --two-stage \
   --bpm 128 \
   --seed 42 \
   --output my_map/
 ```
+
+Recommended flags per difficulty are in `models/current/generation.json`. To use a checkpoint you just trained instead, pass `--checkpoint output/training/checkpoints/best`.
 
 The output folder can be copied directly to `Beat Saber_Data/CustomLevels/` to play in-game.
 
@@ -155,7 +168,7 @@ The output folder can be copied directly to `Beat Saber_Data/CustomLevels/` to p
 
 ```bash
 beat-weaver evaluate \
-  --checkpoint output/training/checkpoints/best \
+  --checkpoint models/current \
   --audio-manifest data/audio_manifest.json \
   --data data/processed
 ```
@@ -172,20 +185,14 @@ Note: this runs with conservative defaults (`--max-maps 100`). For full training
 
 ## Architecture
 
-An encoder-decoder model that takes a log-mel spectrogram as input and generates a sequence of beat-quantized tokens representing note placements.
+Generation runs in two stages. A Conformer encoder reads the song; its onset head and a scheduler decide **when** notes happen, and the token decoder decides **what** each note is (hand, cell, cut direction) under playability rules. Several candidates per difficulty are then scored against reference maps and a kinematic body simulation, and the best are kept.
 
 ```
-Audio (mel spectrogram + onset) -> [Conformer Encoder] -> [Token Decoder] -> Token Sequence -> v2 Beat Saber Map
+Audio -> [Conformer Encoder] -> onset head -> scheduler (when) ─┐
+                             └-> [Token Decoder] (what) ─────────┴-> notes -> beat_sim scoring -> best map per difficulty
 ```
 
-- **Tokenizer:** 291-token vocabulary encoding difficulty, bar structure, beat positions, and compound note placements (position + direction per hand)
-- **Encoder:** Linear projection + RoPE + Conformer blocks (FFN/2 + self-attention + depthwise conv + FFN/2 + LayerNorm). Falls back to standard Transformer with `use_conformer=false`.
-- **Decoder:** Token embedding + RoPE + Transformer decoder with cross-attention to encoder
-- **Audio features:** Log-mel spectrogram (80 bins) with onset strength channel
-- **Training:** AdamW + cosine LR, mixed-precision (fp16), SpecAugment, color balance loss, dataset filtering by difficulty/characteristic/BPM, weighted sampling (official maps oversampled)
-- **Inference:** Autoregressive generation with grammar constraints ensuring valid map structure. Windowed generation with overlap stitching for songs of any length.
-
-See [RESEARCH.md](RESEARCH.md) for research details and [plans/](plans/) for implementation plans.
+Full details, including what changed from the upstream single-stage design, are in **[ARCHITECTURE.md](ARCHITECTURE.md)**. See [RESEARCH.md](RESEARCH.md) for research details and [plans/](plans/) for implementation plans.
 
 ## Project Status
 
@@ -194,11 +201,13 @@ See [RESEARCH.md](RESEARCH.md) for research details and [plans/](plans/) for imp
 - **Baseline training** — complete (small model: 16 epochs, 23K songs, 60.6% token accuracy, generates playable maps)
 - **Model improvements** — complete (dataset filtering, SpecAugment, onset features, RoPE, color balance loss, Conformer encoder)
 - **Conformer training** — complete (9.4M params, best val_loss=2.23, 59.4% accuracy at epoch 26, Expert+ only)
+- **Two-stage generation** — complete (onset-head timing, placement-only fine-tune, playability masks; production model `beat-weaver-placement-v1`)
+- **Map evaluation and selection** — complete (`beat_sim`: reference-band scoring, music fit, kinematic body simulation, multi-difficulty mapper)
 
 ## Tests
 
 ```bash
-# Run all tests (178 total; ML tests auto-skip without ML deps)
+# Run all tests (ML tests auto-skip without ML deps)
 python -m pytest tests/ -v
 ```
 
