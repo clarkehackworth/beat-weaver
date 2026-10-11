@@ -33,11 +33,11 @@ RANK = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
 # difficulties get fewer doubles and a wider min gap so the schedule can't form streams at all.
 # max_doubles caps the doubles rate, which otherwise swings 0.1-0.8 by song and let Hard out-dense Expert.
 PRESET = {
-    "Easy":       dict(min_gap=0.40, doubles_bias=0.3, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.15, beat_floor=0.5, max_run=0,  beat_focus=False),
-    "Normal":     dict(min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.2,  beat_floor=0.5, max_run=0,  beat_focus=False),
-    "Hard":       dict(min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25, beat_floor=0.5, max_run=12, beat_focus=False),
-    "Expert":     dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=0.6, column_max_run=4, reset_gap=0.5, max_doubles=0.4,  beat_floor=0.5, max_run=20, beat_focus=True),
-    "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1.5, vision_penalty=6, stream_bias=0.6, column_max_run=4, reset_gap=0.5, max_doubles=0.45, beat_floor=0.5, max_run=32, beat_focus=True),
+    "Easy":       dict(min_gap=0.40, doubles_bias=0.3, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.15, beat_floor=0.3, max_run=0,  beat_focus=False),
+    "Normal":     dict(min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.2,  beat_floor=0.3, max_run=0,  beat_focus=False),
+    "Hard":       dict(min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25, beat_floor=0.3, max_run=12, beat_focus=False),
+    "Expert":     dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=0.6, column_max_run=4, reset_gap=0.5, max_doubles=0.4,  beat_floor=0.3, max_run=20, beat_focus=True),
+    "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1.5, vision_penalty=6, stream_bias=0.6, column_max_run=4, reset_gap=0.5, max_doubles=0.45, beat_floor=0.3, max_run=32, beat_focus=True),
 }
 # beat_floor / max_run / beat_focus / stream_bias 0.6 / dynamics 1.5: added after Remedy's Expert+ came out as one
 # 210-note eighth-note line (93% half-beat gaps, 17 rests/min). Quiet beats now rest, runs are capped and
