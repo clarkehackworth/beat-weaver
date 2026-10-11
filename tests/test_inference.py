@@ -677,3 +677,27 @@ class TestGenerateFullSong:
         )
         for i in range(1, len(notes)):
             assert notes[i].beat >= notes[i - 1].beat
+
+    def test_cap_runs_ends_a_full_run_with_a_whole_beat_rest(self):
+        from beat_weaver.model.inference import _cap_runs
+        sched = list(range(0, 64 * 4, 8))  # unbroken eighth-note stream, 32 notes over 4 bars
+        capped = _cap_runs(sched, 8)
+        assert len(capped) < len(sched) and capped == sorted(capped)
+        run = best = 1
+        for a, b in zip(capped, capped[1:]):
+            run = run + 1 if b - a <= 8 else 1
+            best = max(best, run)
+            assert b - a <= 8 or b - a >= 16, "a run ends in a full-beat rest, not a dropped sixteenth"
+        assert best == 8
+        assert _cap_runs(sched, 0) == sched
+
+    def test_beat_floor_leaves_quiet_beats_empty(self, small_model):
+        from beat_weaver.model.inference import _onset_schedule
+        model, config = small_model
+        n = 64
+        model.onset_head = self._fixed_onset_head(list(range(0, 32)), n)  # beats 1-2 hot, 3-4 silent
+        memory = torch.zeros(1, n, config.encoder_dim)
+        every = _onset_schedule(model, memory, n, notes_per_beat=1.0, min_gap=4, dynamics=0.0)
+        floored = _onset_schedule(model, memory, n, notes_per_beat=1.0, min_gap=4, dynamics=0.0, beat_floor=0.5)
+        assert any(f >= 32 for f in every), "without a floor every beat gets its note"
+        assert floored and all(f < 32 for f in floored), floored

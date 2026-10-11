@@ -33,12 +33,15 @@ RANK = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
 # difficulties get fewer doubles and a wider min gap so the schedule can't form streams at all.
 # max_doubles caps the doubles rate, which otherwise swings 0.1-0.8 by song and let Hard out-dense Expert.
 PRESET = {
-    "Easy":       dict(min_gap=0.40, doubles_bias=0.3, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.15),
-    "Normal":     dict(min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.2),
-    "Hard":       dict(min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25),
-    "Expert":     dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=4, reset_gap=0.5, max_doubles=0.4),
-    "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=4, reset_gap=0.5, max_doubles=0.45),
+    "Easy":       dict(min_gap=0.40, doubles_bias=0.3, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.15, beat_floor=0.5, max_run=0,  beat_focus=False),
+    "Normal":     dict(min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.2,  beat_floor=0.5, max_run=0,  beat_focus=False),
+    "Hard":       dict(min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25, beat_floor=0.5, max_run=12, beat_focus=False),
+    "Expert":     dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=0.6, column_max_run=4, reset_gap=0.5, max_doubles=0.4,  beat_floor=0.5, max_run=20, beat_focus=True),
+    "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1.5, vision_penalty=6, stream_bias=0.6, column_max_run=4, reset_gap=0.5, max_doubles=0.45, beat_floor=0.5, max_run=32, beat_focus=True),
 }
+# beat_floor / max_run / beat_focus / stream_bias 0.6 / dynamics 1.5: added after Remedy's Expert+ came out as one
+# 210-note eighth-note line (93% half-beat gaps, 17 rests/min). Quiet beats now rest, runs are capped and
+# end in a whole-beat rest, extras bunch on the strongest beats, chains take hot sixteenths, loud bars fill more.
 DOUBLES_FRACTION = {"Easy": 0.10, "Normal": 0.15, "Hard": 0.20, "Expert": 0.25, "ExpertPlus": 0.25}
 DENSITY_VARIANTS = (0.85, 1.15)  # ponytail: two hedges around the preset; widen if winners sit at an edge
 
@@ -48,9 +51,10 @@ def target_nps(diff: str) -> float:
     return (lo + hi) / 2 / (1 + DOUBLES_FRACTION[diff])
 
 
-def flags_for(diff: str, nps: float, seed: int, beat_focus: bool = False) -> str:
+def flags_for(diff: str, nps: float, seed: int) -> str:
     p = PRESET[diff]
-    return (("--beat-focus " if beat_focus else "") + f"--two-stage --notes-per-second {nps:.2f} --min-gap {p['min_gap']} --doubles-bias {p['doubles_bias']} "
+    return (("--beat-focus " if p["beat_focus"] else "") + f"--beat-floor {p['beat_floor']} --max-run {p['max_run']} "
+            f"--two-stage --notes-per-second {nps:.2f} --min-gap {p['min_gap']} --doubles-bias {p['doubles_bias']} "
             f"--flow-penalty {p['flow_penalty']} --dynamics {p['dynamics']} --vision-penalty {p['vision_penalty']} "
             f"--stream-bias {p['stream_bias']} --column-max-run {p['column_max_run']} "
             f"--reset-gap {p['reset_gap']} --max-doubles {p['max_doubles']} --seed {seed}")
@@ -189,16 +193,13 @@ def main() -> None:
             for i in range(args.candidates):
                 seed, variant = divmod(i, len(DENSITY_VARIANTS))
                 nps = base * DENSITY_VARIANTS[variant]
-                # Expert+ alternates beat focus by seed: it puts rests between streams (r9: in-band longest run
-                # 6/6 vs 2/6) but can push a song's streams above the band, so let the scorer choose per song.
-                focus = diff == "ExpertPlus" and seed % 2 == 0
-                name = f"{diff}__nps{nps:.2f}__s{seed}" + ("__focus" if focus else "")
+                name = f"{diff}__nps{nps:.2f}__s{seed}"
                 if (work / name / "Info.dat").exists():
                     continue
                 out_dir = shlex.quote(f"{REMOTE_ROOT}/{stem}_candidates/{name}")
                 cmd = (f"cd /data && {ENV} python -m beat_weaver.cli generate --checkpoint {args.checkpoint} "
                        f"--audio {REMOTE_ROOT}/{shlex.quote(remote_song)} --difficulty {diff} --output {out_dir} "
-                       f"{flags_for(diff, nps, seed, focus)}")
+                       f"{flags_for(diff, nps, seed)}")
                 print(f"generate {name} ...", end="", flush=True)
                 log = remote(cmd)
                 print(" " + (log.strip().splitlines() or ["done"])[-1])

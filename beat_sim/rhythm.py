@@ -139,6 +139,18 @@ WEIGHTS = {  # what matters most, per the alignment discussion
     "converging": 2,  # same-time pairs whose cuts drive the sabers into each other (favourites median 0)
     "near_converging": 1,  # 45 deg off head-on with one cut aimed at the other note; legal but very hard
 }
+# Graded instead of pass/fail: full credit in the middle half of the band, fading to 0 at either edge.
+# A 210-note stream passed Expert+'s (15, 205) band as "in band" and scored the same as a 60-note one.
+GRADED = ("longest_run", "gap_le_half")
+
+
+def _credit(k: str, v: float, lo: float, hi: float) -> float:
+    if k not in GRADED:
+        return float(lo <= v <= hi)
+    half = (hi - lo) / 2 or 1.0
+    return max(0.0, min(1.0, 2.0 * (1.0 - abs(v - (lo + hi) / 2) / half)))
+
+
 _CUT = {0: (0, 1), 1: (0, -1), 2: (-1, 0), 3: (1, 0), 4: (-1, 1), 5: (1, 1), 6: (-1, -1), 7: (1, -1)}
 
 
@@ -255,7 +267,7 @@ def score(notes: list[Note], bpm: float, difficulty: str = "Expert", extra: dict
     bands = BANDS[difficulty]
     inb = {k: bool(bands[k][0] <= v <= bands[k][1]) for k, v in st.items()}
     total = sum(WEIGHTS[k] for k in st)
-    return RhythmReport(difficulty, st, inb, 100.0 * sum(WEIGHTS[k] for k, ok in inb.items() if ok) / total)
+    return RhythmReport(difficulty, st, inb, 100.0 * sum(WEIGHTS[k] * _credit(k, v, *bands[k]) for k, v in st.items()) / total)
 
 
 if __name__ == "__main__":
@@ -268,6 +280,7 @@ if __name__ == "__main__":
     r = score(notes, 120.0)
     assert r.in_band["nps"] and r.in_band["streams_per_min"] and r.in_band["longest_run"], r.table()
     assert not r.in_band["doubles"] and not r.in_band["top_row"], "a pure stream has no doubles and no top row"
+    assert _credit("longest_run", 110, 15, 205) == 1.0 and _credit("longest_run", 210, 15, 205) == 0.0 and 0 < _credit("longest_run", 180, 15, 205) < 1
     sparse = score(notes[::4], 120.0)
     assert sparse.score < r.score and not sparse.in_band["nps"]
     assert "energy_corr" not in r.stats and r.in_band["lead_in"] is False, "no audio: no music metrics; lead-in 0 s is out of band"

@@ -268,6 +268,7 @@ def _onset_schedule(
     notes_per_beat: float | None = None, min_gap: int = 4, dynamics: float = 1.0,
     stream_bias: float = 1.0,
     beat_focus: bool = False,
+    beat_floor: float = 0.0,
 ) -> list[int]:
     """Stage 1 of two-stage decoding: the frames that get a note.
 
@@ -294,6 +295,11 @@ def _onset_schedule(
     single note, which leaves a rest of about a beat between streams. Without it the
     extras are spread evenly, so at Expert+ density no gap is ever longer than half
     a beat and the whole song plays as one unbroken stream.
+
+    ``beat_floor``: a beat whose peak probability is under ``beat_floor`` x the
+    bar's peak gets no note at all. 0 (off) guarantees every beat one note, so
+    rests longer than a beat only appear when a whole bar's budget rounds to 0 and
+    Expert+ plays as one 200-note line. 0.5 lets quiet beats rest.
     """
     p = torch.sigmoid(model.onset_head(memory)[0, :n_frames, 0].float())
     beat = SUBDIVISIONS_PER_BAR // 4
@@ -314,18 +320,20 @@ def _onset_schedule(
         peak = pb.max().item() * stream_bias
         per_beat = [0] * len(queues)
         picked = 0
+        # quiet beats (under beat_floor x the bar's peak) are skipped and never reserved for
+        live = [pb[j * beat: (j + 1) * beat].max().item() >= pb.max().item() * beat_floor for j in range(len(queues))]
         # Beats take turns strongest-first, so a bar's remainder (6 notes over 4 beats = 2,2,1,1) goes to the
         # beats the onset head likes best. Always starting at beat 1 gave beats 1-2 twice the notes of 3-4.
-        order = sorted(range(len(queues)), key=lambda j: -pb[j * beat: (j + 1) * beat].max().item())
-        while picked < k and any(queues):
+        order = sorted((j for j in range(len(queues)) if live[j]), key=lambda j: -pb[j * beat: (j + 1) * beat].max().item())
+        while picked < k and any(queues[j] for j in order):
             before = picked
-            focus = beat_focus and all(c > 0 for c in per_beat)
+            focus = beat_focus and all(per_beat[j] > 0 for j in order)
             for qi in order:
                 if focus and picked > before:
                     break  # one pick per pass, always from the strongest beat that still has room
                 q = queues[qi]
                 # a beat that already has a note yields to beats that have none
-                reserve = sum(1 for j in range(len(queues)) if j != qi and per_beat[j] == 0)
+                reserve = sum(1 for j in order if j != qi and per_beat[j] == 0)
                 if per_beat[qi] > 0 and picked >= k - reserve:
                     continue
                 while q:
@@ -342,7 +350,7 @@ def _onset_schedule(
                             if g >= b0 + len(pb) or p[g].item() < peak or any(abs(g - c) < min_gap for c in chosen):
                                 break
                             gi = (g - b0) // beat
-                            reserve = sum(1 for j in range(gi + 1, len(queues)) if per_beat[j] == 0)
+                            reserve = sum(1 for j in order if j > gi and per_beat[j] == 0)
                             if picked >= k - reserve:
                                 break
                             chosen.append(g)
@@ -359,6 +367,26 @@ def _onset_schedule(
                 break
     return sorted(chosen)
 
+
+
+def _cap_runs(schedule: list[int], max_run: int, beat: int = SUBDIVISIONS_PER_BAR // 4) -> list[int]:
+    """Drop frames so no run (notes within half a beat of each other) exceeds ``max_run``.
+
+    Once a run is full, every frame is dropped until a gap of a whole beat opens, so
+    the stream ends in a real rest. ponytail: the dropped budget is not re-spent, the
+    density variants in beat_sim.mapper hedge that; re-spend elsewhere if winners sit low.
+    """
+    if max_run <= 0:
+        return schedule
+    kept: list[int] = []
+    run = 0
+    for f in sorted(schedule):
+        gap = f - kept[-1] if kept else beat
+        if run >= max_run and gap < beat:
+            continue
+        run = run + 1 if gap <= beat // 2 else 1
+        kept.append(f)
+    return kept
 
 
 def _sample_with_filter(
@@ -421,6 +449,8 @@ def generate(
     block_near_converging: bool = True,
     reset_gap: int = 0,
     max_doubles: float = 1.0,
+    beat_floor: float = 0.0,
+    max_run: int = 0,
 ) -> list[int]:
     """Generate a token sequence autoregressively.
 
@@ -508,7 +538,7 @@ def generate(
     n_bars = min(audio_bars or BAR_COUNT, BAR_COUNT)
     schedule = None
     if two_stage:
-        schedule = _onset_schedule(model, memory, n_bars * SUBDIVISIONS_PER_BAR, notes_per_beat, min_gap, dynamics, stream_bias, beat_focus)
+        schedule = _cap_runs(_onset_schedule(model, memory, n_bars * SUBDIVISIONS_PER_BAR, notes_per_beat, min_gap, dynamics, stream_bias, beat_focus, beat_floor), max_run)
     sched_i = 0
 
     # Start with [START, DIFF_x]
@@ -693,6 +723,8 @@ def generate_full_song(
     block_near_converging: bool = True,
     reset_seconds: float = 0.0,
     max_doubles: float = 1.0,
+    beat_floor: float = 0.0,
+    max_run: int = 0,
 ) -> list[Note]:
     """Generate a complete Beat Saber map by processing audio in overlapping windows.
 
@@ -739,7 +771,7 @@ def generate_full_song(
             audio_bars=_audio_bars(total_frames), onset_guidance=onset_guidance,
             two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap, dynamics=dynamics,
             flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
-            reset_gap=reset_gap, max_doubles=max_doubles,
+            reset_gap=reset_gap, max_doubles=max_doubles, beat_floor=beat_floor, max_run=max_run,
         )
         return [n for n in decode_tokens(tokens, bpm) if lead_in_beat <= n.beat < min(audio_end_beat, end_beat)]
 
@@ -776,7 +808,7 @@ def generate_full_song(
             audio_bars=_audio_bars(min(max_len, total_frames - start)),
             onset_guidance=onset_guidance, two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap,
             dynamics=dynamics, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
-            reset_gap=reset_gap, max_doubles=max_doubles,
+            reset_gap=reset_gap, max_doubles=max_doubles, beat_floor=beat_floor, max_run=max_run,
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)
