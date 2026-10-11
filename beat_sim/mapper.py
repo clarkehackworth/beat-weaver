@@ -43,12 +43,13 @@ PRESET = {
 # 210-note eighth-note line (93% half-beat gaps, 17 rests/min). Quiet beats now rest, runs are capped and
 # end in a whole-beat rest, extras bunch on the strongest beats, chains take hot sixteenths, loud bars fill more.
 DOUBLES_FRACTION = {"Easy": 0.10, "Normal": 0.15, "Hard": 0.20, "Expert": 0.25, "ExpertPlus": 0.25}
+DENSITY_SCALE = {"Expert": 1.1, "ExpertPlus": 1.1}  # ponytail: generated nps lands ~18% over target and the scorer picked the low candidate; tune per play test
 DENSITY_VARIANTS = (0.85, 1.15)  # ponytail: two hedges around the preset; widen if winners sit at an edge
 
 
 def target_nps(diff: str) -> float:
     lo, hi = BANDS[diff]["nps"]
-    return (lo + hi) / 2 / (1 + DOUBLES_FRACTION[diff])
+    return (lo + hi) / 2 / (1 + DOUBLES_FRACTION[diff]) * DENSITY_SCALE.get(diff, 1.0)
 
 
 def flags_for(diff: str, nps: float, seed: int) -> str:
