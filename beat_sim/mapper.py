@@ -44,7 +44,18 @@ PRESET = {
 # end in a whole-beat rest, extras bunch on the strongest beats, chains take hot sixteenths, loud bars fill more.
 DOUBLES_FRACTION = {"Easy": 0.10, "Normal": 0.15, "Hard": 0.20, "Expert": 0.25, "ExpertPlus": 0.25}
 DENSITY_SCALE = {"Expert": 1.1, "ExpertPlus": 1.1}  # ponytail: generated nps lands ~18% over target and the scorer picked the low candidate; tune per play test
+DENSITY_BONUS = {"Expert": 10.0, "ExpertPlus": 10.0}  # max points added to the ranking score (not the report)
 DENSITY_VARIANTS = (0.85, 1.0, 1.15)  # ponytail: two hedges around the preset; widen if winners sit at an edge
+
+
+def density_bonus(diff: str, nps: float) -> float:
+    """Ranking bonus for density: 0 at the bottom of the difficulty's nps band, full at its midpoint, flat above.
+
+    The composite only counts metrics in band, so it always preferred the lightest in-band candidate. Capped at the
+    midpoint so a denser chart that leaves the band (and loses points there) is never rewarded for it.
+    """
+    lo, hi = BANDS[diff]["nps"]
+    return DENSITY_BONUS.get(diff, 0.0) * min(max((nps - lo) / (hi - lo), 0.0), 0.5) / 0.5
 
 
 def target_nps(diff: str) -> float:
@@ -219,7 +230,7 @@ def main() -> None:
             composite, nps, ev, bad = res
             print(f"  {folder.name:34s} composite={composite:5.1f} nps={nps:.2f} "
                   f"doubles={ev['rhythm']['stats']['doubles']:.2f} out={','.join(bad) or '-'}")
-            cands.setdefault(diff, []).append((composite, nps, folder, ev))
+            cands.setdefault(diff, []).append((composite + density_bonus(diff, nps), nps, folder, ev))
     picked = pick_ladder(cands)
     winners = {d: c[2] for d, c in picked.items()}
     report = {d: {"folder": c[2].name, **c[3]} for d, c in picked.items()}
