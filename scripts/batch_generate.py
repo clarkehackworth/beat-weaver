@@ -221,6 +221,7 @@ def main() -> None:
     ap.add_argument("--no-web-cover", action="store_true", help="don't look covers up on YouTube/iTunes")
     ap.add_argument("--no-sync", action="store_true", help="skip pushing repo code to the container")
     ap.add_argument("--keep-remote", action="store_true", help="leave generated files in the container")
+    ap.add_argument("--no-validate", action="store_true", help="skip the post-merge structure/playability gate")
     ap.add_argument("--dry", action="store_true", help="list songs and presets, touch nothing remote")
     args = ap.parse_args()
 
@@ -321,6 +322,23 @@ def main() -> None:
     shutil.rmtree(fetch_tmp, ignore_errors=True)
     if not args.keep_remote:
         dexec(args.bw_host, args.container, f"rm -rf {REMOTE_INBOX} {REMOTE_OUT}")
+
+    # post-merge structure + playability gate (no torch; runs here, not in the container)
+    if not args.no_validate:
+        written = [args.out / f.stem for f in files if (args.out / f.stem / "Info.dat").exists()]
+        if written:
+            from beat_weaver.model.map_check import check_paths
+            reports = check_paths(written)
+            n_struct = sum(len(r.structure_issues) for r in reports)
+            n_play = sum(len(r.playability_issues) for r in reports)
+            print(f"\n[validate] {len(reports)} folder(s): {n_struct} structural issue(s), {n_play} playability warning(s)")
+            for r in reports:
+                if r.structure_issues:
+                    for i in r.structure_issues:
+                        print(f"  [struct] {Path(r.folder).name}/{i.difficulty}: {i.message} ({i.count})")
+            if n_struct:
+                print("[validate] structural issues found — fix before shipping to CustomLevels")
+
     print(f"\n{ok} map(s) written to {args.out}, {miss} failed. Copy any folder to Beat Saber_Data/CustomLevels/.")
 
 

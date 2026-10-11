@@ -2,6 +2,7 @@
 
 import argparse
 import os
+import sys
 import logging
 from pathlib import Path
 
@@ -233,6 +234,26 @@ def cmd_generate(args: argparse.Namespace) -> None:
     print(f"Generated map: {output} ({n_windows} window(s), {len(notes)} notes)")
 
 
+def cmd_validate(args: argparse.Namespace) -> int:
+    """Validate Beat Saber map folders (structure + playability, no torch).
+
+    Exits non-zero if any folder has structural issues or playability
+    warnings exceed --max-issues (default: structural only fail the build).
+    """
+    from beat_weaver.model.map_check import check_paths
+    reports = check_paths(args.maps)
+    for r in reports:
+        print(r.summary())
+    n_struct = sum(len(r.structure_issues) for r in reports)
+    n_play = sum(len(r.playability_issues) for r in reports)
+    print(f"\n{len(reports)} folders: {n_struct} structural issues, {n_play} playability warnings")
+    if n_struct or n_play > args.max_issues:
+        print("VALIDATE FAILED")
+        return 1
+    print("VALIDATE PASSED")
+    return 0
+
+
 def cmd_evaluate(args: argparse.Namespace) -> None:
     import json as _json
     import torch
@@ -416,6 +437,12 @@ def main() -> None:
     gen.add_argument("--lead-in", type=float, default=2.0,
                      help="Seconds at the start of the song with no notes")
 
+    # validate (no torch — structure + playability gate for exported map folders)
+    val = sub.add_parser("validate", help="Validate map folders (structure + playability, no torch)")
+    val.add_argument("maps", nargs="+", help="Map folder(s) or parent dir(s) to validate")
+    val.add_argument("--max-issues", type=int, default=100000,
+                     help="Fail if total playability warnings exceed this (structural issues always fail)")
+
     # evaluate
     ev = sub.add_parser("evaluate", help="Evaluate model on test data")
     ev.add_argument("--checkpoint", required=True, help="Model checkpoint directory")
@@ -437,12 +464,13 @@ def main() -> None:
         "run": cmd_run,
         "train": cmd_train,
         "generate": cmd_generate,
+        "validate": cmd_validate,
         "evaluate": cmd_evaluate,
     }
 
     handler = commands.get(args.command)
     if handler:
-        handler(args)
+        sys.exit(handler(args) or 0)
     else:
         parser.print_help()
 
