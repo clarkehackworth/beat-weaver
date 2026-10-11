@@ -172,6 +172,28 @@ Recommended flags per difficulty are in `generation.json` beside the production 
 
 The output folder can be copied directly to `Beat Saber_Data/CustomLevels/` to play in-game.
 
+### Step 7b: Batch-generate a folder of songs
+
+`scripts/batch_generate.py` turns a folder (or list) of audio files into one playable map folder per song, each with every requested difficulty, correct song/artist metadata, a preview start, and cover art. It runs generation as `beat-weaver generate --two-stage` inside the `beat-weaver` container on your GPU host over ssh — the same host you train on — so a laptop can drive the whole batch. It picks each difficulty's flags from `generation.json` beside the model (falling back to the same presets as `beat_sim/mapper.py`).
+
+```bash
+# All songs in a folder, all five difficulties, one playable folder per song, author set
+python scripts/batch_generate.py /path/to/songs \
+  --bw-host user@gpu-host \
+  --author "Your Name" \
+  --out ~/Downloads/maps
+
+# A subset of difficulties, 8 in parallel, skip the web cover lookup
+python scripts/batch_generate.py /path/to/songs \
+  --bw-host user@gpu-host \
+  --difficulties Expert ExpertPlus --concurrency 8 --no-web-cover
+
+# Preview: list the songs and the per-difficulty presets it would use (touches nothing remote)
+python scripts/batch_generate.py /path/to/songs --dry
+```
+
+It syncs this repo's `beat_weaver/` into the container so the CLI there has the current flags, uploads all audio in one stream, generates each (song, difficulty) pair in waves of `--concurrency`, then merges each song's difficulties into a single folder: `<out>/<song>/` with one `Info.dat`, a `<difficulty>.dat` per level, the audio as `song.egg`, and `cover.jpg` (embedded art first, then a YouTube/iTunes lookup unless `--no-web-cover`). With `--keep-remote`, generated (song, difficulty) pairs stay in the container and are skipped on the next run, so you can re-run it to fill in failures; each job's log is kept beside its output and the last line is printed for any that failed. Copy any folder to `Beat Saber_Data/CustomLevels/`.
+
 ### Step 8: Evaluate (optional)
 
 ```bash

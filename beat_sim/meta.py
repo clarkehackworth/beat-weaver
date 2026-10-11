@@ -201,6 +201,45 @@ def itunes_cover(title: str, artist: str) -> tuple[bytes, str] | None:
     return None
 
 
+def _squash(text: str) -> str:
+    """Letters and digits only, so "Crushcrushcrush" matches "Crush Crush Crush" and "Goin' Out West" "Goin Out West"."""
+    return re.sub(r"[^a-z0-9]", "", text.lower())
+
+
+def _words(text: str) -> set[str]:
+    return _tokens(text.replace("'", "").replace("\u2019", ""))
+
+
+_EXTRA = re.compile(r"\s*[\(\[]([^\)\]]*\b(?:cover|feat\.?|ft\.?|remix|live|reimagined|acoustic)\b[^\)\]]*)[\)\]]", re.I)
+
+
+def itunes_identify(stem: str, title: str, artist: str) -> tuple[str, str] | None:
+    """(title, artist) for a file name, checked against the iTunes catalogue; None when nothing matches.
+
+    A file name can't say which side of the dash is the artist ("Call Me - Shinedown") and often has
+    no artist at all ("Gangstas Paradise"). A result is taken when its track and artist names both
+    appear in the file name; failing that, when the guessed artist is empty, a result whose track
+    name appears in it (that is how "What Have You Done (feat. Keith Caputo)" finds Within Temptation).
+    """
+    raw = f"{artist} {title}".strip()
+    bare = re.sub(r"[\(\[][^\)\]]*[\)\]]", "", raw).strip()  # "(Cover by ...)" often sinks the search
+    results = []
+    for q in dict.fromkeys((bare, re.sub(r"\bcover\b", "", bare, flags=re.I).strip(), raw)):  # ponytail: 3 tries, then give up
+        try:
+            results += json.loads(_get(f"https://itunes.apple.com/search?term={urllib.parse.quote(q)}&media=music&entity=song&limit=15")).get("results", [])
+        except (OSError, ValueError):
+            continue
+    have = _squash(stem.replace(" _26 ", " & "))
+    named = [(_EXTRA.sub("", r.get("trackName", "")).strip(), r.get("artistName", "")) for r in results]
+    named = [(t, a) for t, a in named if _squash(t) and _squash(a) and _squash(t) in have]
+    for t, a in named:
+        if _squash(a) in have:
+            return t, a
+    if not artist and named:
+        return named[0]
+    return None
+
+
 def web_cover(title: str, artist: str, hint: str = "") -> tuple[bytes, str] | None:
     """YouTube thumbnail first, then iTunes album art. None when neither matches the song."""
     return youtube_cover(title, artist, hint) or itunes_cover(title, artist)
@@ -234,18 +273,40 @@ def _embedded_cover(audio: Path, out_dir: Path) -> str:
     if probe.returncode or not probe.stdout.strip():
         return ""
     dest = out_dir / "cover.jpg"
-    r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(audio), "-an", "-frames:v", "1", str(dest)])
-    return dest.name if r.returncode == 0 and dest.exists() else ""
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", str(audio), "-an", "-frames:v", "1", str(dest)])
+    # ffmpeg can exit non-zero yet write a good image; judge the file, not the exit code
+    try:
+        from PIL import Image
+
+        with Image.open(dest) as im:
+            im.verify()
+        return dest.name
+    except Exception:
+        dest.unlink(missing_ok=True)
+        return ""
 
 
 def song_meta(audio: Path, title: str | None = None, artist: str | None = None, mapper: str | None = None,
-              with_preview: bool = True) -> dict:
-    """Info.dat fields for this song. Explicit arguments beat file tags, which beat the file name."""
+              with_preview: bool = True, web: bool = True) -> dict:
+    """Info.dat fields for this song. Explicit arguments beat file tags, which beat the file name.
+
+    A file-name guess is checked against iTunes (web=True), which fixes swapped title/artist and fills a
+    missing artist. A "(Cover by ...)" / "(feat. ...)" from the file name goes to the sub-name.
+    """
     tags = read_tags(audio)
     f_title, f_artist = parse_filename(audio.stem)
+    sub = ""
+    if web and not (title and artist) and not (tags.get("title") and tags.get("artist")):
+        hit = itunes_identify(audio.stem, f_title, f_artist)
+        if hit:
+            extras = [m.group(1).strip() for m in _EXTRA.finditer(f"{f_title} {f_artist}")]
+            extras += [w for w in ("cover",) if w in _words(audio.stem) and not extras and w not in _words(hit[0] + hit[1])]
+            extras = [e for e in extras if not _squash(re.sub(r"^(?:feat\.?|ft\.?)\s*", "", e, flags=re.I)) in _squash(hit[1])]
+            f_title, f_artist, sub = hit[0], hit[1], ", ".join(e for e in extras if e)
+            sub = sub.capitalize() if sub == "cover" else sub
     meta = {
         "_songName": title or tags.get("title") or f_title,
-        "_songSubName": "",
+        "_songSubName": sub,
         "_songAuthorName": artist or tags.get("artist") or f_artist,
         "_levelAuthorName": mapper_name(mapper),
         "_previewDuration": int(PREVIEW_SECONDS),

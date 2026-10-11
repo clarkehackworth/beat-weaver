@@ -31,12 +31,13 @@ RANK = {"Easy": 1, "Normal": 3, "Hard": 5, "Expert": 7, "ExpertPlus": 9}
 
 # Flags that are not density. doubles_bias ~1.0 lands near the favourites' 0.25 doubles rate; lower
 # difficulties get fewer doubles and a wider min gap so the schedule can't form streams at all.
+# max_doubles caps the doubles rate, which otherwise swings 0.1-0.8 by song and let Hard out-dense Expert.
 PRESET = {
-    "Easy":       dict(min_gap=0.40, doubles_bias=0.3, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
-    "Normal":     dict(min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
-    "Hard":       dict(min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
-    "Expert":     dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
-    "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0),
+    "Easy":       dict(min_gap=0.40, doubles_bias=0.3, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.15),
+    "Normal":     dict(min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.2),
+    "Hard":       dict(min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25),
+    "Expert":     dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=4, reset_gap=0.5, max_doubles=0.4),
+    "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=4, reset_gap=0.5, max_doubles=0.45),
 }
 DOUBLES_FRACTION = {"Easy": 0.10, "Normal": 0.15, "Hard": 0.20, "Expert": 0.25, "ExpertPlus": 0.25}
 DENSITY_VARIANTS = (0.85, 1.15)  # ponytail: two hedges around the preset; widen if winners sit at an edge
@@ -51,7 +52,8 @@ def flags_for(diff: str, nps: float, seed: int, beat_focus: bool = False) -> str
     p = PRESET[diff]
     return (("--beat-focus " if beat_focus else "") + f"--two-stage --notes-per-second {nps:.2f} --min-gap {p['min_gap']} --doubles-bias {p['doubles_bias']} "
             f"--flow-penalty {p['flow_penalty']} --dynamics {p['dynamics']} --vision-penalty {p['vision_penalty']} "
-            f"--stream-bias {p['stream_bias']} --seed {seed}")
+            f"--stream-bias {p['stream_bias']} --column-max-run {p['column_max_run']} "
+            f"--reset-gap {p['reset_gap']} --max-doubles {p['max_doubles']} --seed {seed}")
 
 
 def upload_song(song: Path, stem: str | None = None) -> str:

@@ -222,7 +222,8 @@ def cmd_generate(args: argparse.Namespace) -> None:
         two_stage=args.two_stage, notes_per_beat=args.notes_per_beat, min_gap_seconds=args.min_gap,
         dynamics=args.dynamics, lead_in_seconds=args.lead_in, flow_penalty=args.flow_penalty,
         end_seconds=last_music_second(audio, sr),
-        notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging,
+        notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, column_max_run=args.column_max_run, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging,
+        reset_seconds=args.reset_gap, max_doubles=args.max_doubles,
     )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
@@ -398,6 +399,12 @@ def main() -> None:
                      help="Logit penalty on notes in the middle-row centre cells (vision blocks); favourites keep ~2%% there")
     gen.add_argument("--vision-max-run", type=int, default=2,
                      help="Max consecutive hits containing a centre-cell note before those cells are masked (0 = no cap)")
+    gen.add_argument("--column-max-run", type=int, default=0,
+                     help="Max consecutive notes one hand puts in the same column before it must move (0 = no cap; 4 tames long up/down straights)")
+    gen.add_argument("--reset-gap", type=float, default=0.5,
+                     help="Seconds: a hand may not cut the same way (within 45 degrees) again this soon (0 = off)")
+    gen.add_argument("--max-doubles", type=float, default=1.0,
+                     help="Cap on the fraction of hits that use both hands (1.0 = no cap)")
     gen.add_argument("--beat-focus", action="store_true",
                      help="Two-stage: give a bar's extra notes to its strongest beats first, leaving rests between streams (Expert+)")
     gen.add_argument("--allow-near-converging", action="store_true",

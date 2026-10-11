@@ -109,6 +109,24 @@ def _converging_right_tokens(left_cell: tuple[int, int], left_dir: int, block_ne
     return m
 
 
+def _reset_tokens(base: int, last_dir: int) -> torch.Tensor:
+    """Boolean (VOCAB_SIZE,) mask of this hand's tokens cutting within 45 degrees of its last cut.
+
+    Cutting the same way twice in a row means the saber has to come back first (a reset).
+    Dots are left alone. ponytail: no slider exception; add one if fast same-way sliders are wanted.
+    """
+    m = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
+    if last_dir < 0 or last_dir == 8:
+        return m
+    same = [d for d in range(8) if float(_CUT_VEC[d] @ _CUT_VEC[last_dir]) > 0]
+    for x in range(COLS):
+        for y in range(ROWS):
+            sl = _note_tokens_on_cell(base, x, y)
+            for d in same:
+                m[sl.start + d] = True
+    return m
+
+
 def _vision_tokens(base: int) -> torch.Tensor:
     """Boolean (VOCAB_SIZE,) mask of this hand's note tokens on the vision-block cells."""
     m = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
@@ -176,7 +194,8 @@ def _build_grammar_mask(
         left_cell: (x, y) of the LEFT note just placed at this position, if any.
             The RIGHT note may not occupy the same cell: two blocks cannot share
             a grid square at one instant. Human maps never do this; the model
-            did it 1.5-2.5% of the time.
+            did it 1.5-2.5% of the time. Nor a column left of it: red right of
+            blue at one instant crosses the arms (45-map batch: 295 such doubles).
 
     Grammar rules:
         START      → DIFF_*
@@ -218,6 +237,7 @@ def _build_grammar_mask(
         mask[_crossover_outward_tokens(RIGHT_BASE)] = False
         if left_cell is not None:
             mask[_note_tokens_on_cell(RIGHT_BASE, *left_cell)] = False
+            mask[RIGHT_BASE: RIGHT_BASE + left_cell[0] * ROWS * DIRS] = False  # no RIGHT note left of the LEFT one: arms would cross
 
     elif last_token == RIGHT_EMPTY or (RIGHT_BASE <= last_token < RIGHT_BASE + RIGHT_COUNT):
         # After RIGHT → POS (strictly increasing), BAR, or END
@@ -396,8 +416,11 @@ def generate(
     doubles_bias: float = 0.0,
     vision_penalty: float = 3.0,
     vision_max_run: int = 2,
+    column_max_run: int = 0,
     beat_focus: bool = False,
     block_near_converging: bool = True,
+    reset_gap: int = 0,
+    max_doubles: float = 1.0,
 ) -> list[int]:
     """Generate a token sequence autoregressively.
 
@@ -416,6 +439,17 @@ def generate(
             decoder puts 25-30% of notes there; favourite Expert+ maps 2% (p90 8%).
         vision_max_run: hard cap on consecutive hits that include such a note.
             After that many, centre cells are masked until a hit lands elsewhere.
+        column_max_run: hard cap on one hand's consecutive notes in the same
+            column. The arc penalty makes "reverse the last cut" cheapest on the
+            same cell, so without this a hand chains straight up/down/up/down in
+            place for 10-20+ notes. After that many, the column is masked for
+            that hand and the arc penalty picks a sweep into a neighbour. 0 = off.
+        reset_gap: frames (1/16 beat). A hand's note this soon after its last
+            one may not cut within 45 degrees of that cut (forced reset). The
+            arc penalty alone left ~4 resets per map. 0 = off.
+        max_doubles: cap on the fraction of hits that use both hands. The
+            doubles rate otherwise swings 0.1-0.8 by song, and a Hard with 0.8
+            doubles came out denser than the Expert. 1.0 = off.
         flow_penalty: Logit penalty, times _arc_penalty, applied to each note
             token for how badly it breaks the saber's arc from that hand's last
             cut: after cutting a cell the hand continues along the cut, and the
@@ -488,6 +522,10 @@ def generate(
     left_dir_open = -1  # cut direction of the LEFT note at the open position
     vision_run = 0  # consecutive hits (POS tokens) that included a vision-cell note
     hit_has_vision = False  # whether the open position has one so far
+    col_run = {LEFT_BASE: 0, RIGHT_BASE: 0}  # consecutive notes per hand in its last column
+    last_frame = {LEFT_BASE: -10**9, RIGHT_BASE: -10**9}  # frame of each hand's last note
+    hits = doubles = 0
+    resets = {(b, d): _reset_tokens(b, d).to(device) for b in (LEFT_BASE, RIGHT_BASE) for d in range(8)}
     vis = {LEFT_BASE: _vision_tokens(LEFT_BASE).to(device), RIGHT_BASE: _vision_tokens(RIGHT_BASE).to(device)}
 
     for _ in range(config.max_seq_len - 2):
@@ -508,6 +546,7 @@ def generate(
                 last_pos_in_bar, current_bar = -1, next_token - BAR_BASE
             elif next_token != END:
                 last_pos_in_bar, left_cell = next_token - POS_BASE, None
+                hits += 1
             if next_token == END:
                 break
             continue
@@ -527,6 +566,7 @@ def generate(
         if schedule is not None and tokens[-1] == LEFT_EMPTY:
             grammar_mask[RIGHT_EMPTY] = False  # a scheduled position holds a note
         next_logits[~grammar_mask] = float("-inf")
+        grammar_only = next_logits.clone()  # fallback if the style masks below leave nothing
 
         # Onset guidance: POS p of the open bar is frame 64*bar + p
         if guidance is not None and current_bar >= 0:
@@ -553,10 +593,30 @@ def generate(
                 if vision_max_run > 0 and vision_run >= vision_max_run:
                     next_logits[vis[base]] = float("-inf")
 
+        # Straights: stop a hand chaining back-and-forths in one column
+        if column_max_run > 0:
+            for base in (LEFT_BASE, RIGHT_BASE):
+                if col_run[base] >= column_max_run:
+                    x = last_cell[base][0]
+                    next_logits[base + x * 27: base + (x + 1) * 27] = float("-inf")
+
+        # Parity: no same-way cut by a hand that just cut, unless it had time to reset
+        if reset_gap > 0:
+            frame = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
+            base = LEFT_BASE if POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT else RIGHT_BASE
+            if 0 <= last_dir[base] < 8 and frame - last_frame[base] < reset_gap:
+                next_logits[resets[(base, last_dir[base])]] = float("-inf")
+
         # Doubles: after a LEFT note, lift every RIGHT note over RIGHT_EMPTY so both hands hit together more often.
         # Favourite Expert+ maps double 9-45% of hits (median 25%); the decoder alone lands near the floor.
-        if doubles_bias > 0 and LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT:
-            next_logits[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] += doubles_bias
+        if LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT:
+            if hits and doubles / hits >= max_doubles:
+                next_logits[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] = float("-inf")
+            elif doubles_bias > 0:
+                next_logits[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] += doubles_bias
+
+        if not torch.isfinite(next_logits).any():
+            next_logits = grammar_only
 
         # Sample
         next_token = _sample_with_filter(next_logits, temperature, top_k, top_p)
@@ -570,14 +630,20 @@ def generate(
             last_pos_in_bar = next_token - POS_BASE
             left_cell, left_dir_open = None, -1
             vision_run = vision_run + 1 if hit_has_vision else 0  # close the previous hit
+            hits += 1
             hit_has_vision = False
         elif LEFT_BASE <= next_token < LEFT_BASE + LEFT_COUNT:
             x, y, d = _decode_note_token(next_token, LEFT_BASE)
+            col_run[LEFT_BASE] = col_run[LEFT_BASE] + 1 if last_cell[LEFT_BASE] and last_cell[LEFT_BASE][0] == x else 1
+            last_frame[LEFT_BASE] = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
             left_cell, left_dir_open = (x, y), d
             last_dir[LEFT_BASE], last_cell[LEFT_BASE] = d, (x, y)
             hit_has_vision |= (x, y) in VISION_CELLS
         elif RIGHT_BASE <= next_token < RIGHT_BASE + RIGHT_COUNT:
             x, y, d = _decode_note_token(next_token, RIGHT_BASE)
+            col_run[RIGHT_BASE] = col_run[RIGHT_BASE] + 1 if last_cell[RIGHT_BASE] and last_cell[RIGHT_BASE][0] == x else 1
+            last_frame[RIGHT_BASE] = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
+            doubles += LEFT_BASE <= tokens[-2] < LEFT_BASE + LEFT_COUNT
             last_dir[RIGHT_BASE], last_cell[RIGHT_BASE] = d, (x, y)
             hit_has_vision |= (x, y) in VISION_CELLS
 
@@ -622,8 +688,11 @@ def generate_full_song(
     doubles_bias: float = 0.0,
     vision_penalty: float = 3.0,
     vision_max_run: int = 2,
+    column_max_run: int = 0,
     beat_focus: bool = False,
     block_near_converging: bool = True,
+    reset_seconds: float = 0.0,
+    max_doubles: float = 1.0,
 ) -> list[Note]:
     """Generate a complete Beat Saber map by processing audio in overlapping windows.
 
@@ -648,6 +717,7 @@ def generate_full_song(
     """
     # ponytail: min spacing between notes in frames (1/16 beats); ~an 8th at 140 BPM, a 1/4 at 80
     min_gap = max(2, round(min_gap_seconds * bpm / 60 * SUBDIVISIONS_PER_BAR / 4))
+    reset_gap = round(reset_seconds * bpm / 60 * SUBDIVISIONS_PER_BAR / 4)
     if notes_per_second is not None:
         # Favourites hold notes/second roughly constant across tempos, so a slow song gets more notes per beat.
         notes_per_beat = min(notes_per_second * 60.0 / bpm, 2.5)  # above ~2.5/beat the 16th grid saturates into one run
@@ -668,7 +738,8 @@ def generate_full_song(
             temperature=temperature, top_k=top_k, top_p=top_p, seed=seed,
             audio_bars=_audio_bars(total_frames), onset_guidance=onset_guidance,
             two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap, dynamics=dynamics,
-            flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
+            flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
+            reset_gap=reset_gap, max_doubles=max_doubles,
         )
         return [n for n in decode_tokens(tokens, bpm) if lead_in_beat <= n.beat < min(audio_end_beat, end_beat)]
 
@@ -704,7 +775,8 @@ def generate_full_song(
             temperature=temperature, top_k=top_k, top_p=top_p, seed=window_seed,
             audio_bars=_audio_bars(min(max_len, total_frames - start)),
             onset_guidance=onset_guidance, two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap,
-            dynamics=dynamics, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
+            dynamics=dynamics, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
+            reset_gap=reset_gap, max_doubles=max_doubles,
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)
@@ -743,4 +815,15 @@ def generate_full_song(
 
     result = [n for n in result if lead_in_beat <= n.beat < end_beat]
     result.sort(key=lambda n: (n.beat, n.color))
+    if reset_seconds > 0:
+        # Windows are decoded independently, so a seam can join two same-way cuts; drop the later one.
+        kept, last = [], {}
+        for n in result:
+            p = last.get(n.color)
+            if p and n.time_seconds - p.time_seconds < reset_seconds and 8 not in (p.cut_direction, n.cut_direction) \
+                    and float(_CUT_VEC[p.cut_direction] @ _CUT_VEC[n.cut_direction]) > 0:
+                continue
+            kept.append(n)
+            last[n.color] = n
+        result = kept
     return result

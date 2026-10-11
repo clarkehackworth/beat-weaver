@@ -80,13 +80,27 @@ class TestGrammarMask:
         mask = _build_grammar_mask(left, left_cell=(2, 1))
         for d in range(9):
             assert not mask[_encode_note_token(RIGHT_BASE, 2, 1, d)], d
-        # every other cell still allowed, and RIGHT_EMPTY too
-        assert mask[_encode_note_token(RIGHT_BASE, 1, 1, 0)]
+        # columns left of the red note would cross the arms; the rest of its column and right of it stay open
+        assert not mask[_encode_note_token(RIGHT_BASE, 1, 1, 0)]
+        assert not mask[_encode_note_token(RIGHT_BASE, 0, 2, 0)]
         assert mask[_encode_note_token(RIGHT_BASE, 2, 0, 0)]
+        assert mask[_encode_note_token(RIGHT_BASE, 3, 1, 0)]
         assert mask[RIGHT_EMPTY]
-        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 9 - 18  # minus crossover-outward tokens
+        allowed = mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum()
+        assert allowed == (2 * 3 - 1) * 9  # columns 2-3 minus the shared cell; the outward rule only hits columns 0-1
         # without the cell the full set is allowed (LEFT_EMPTY case)
         assert _build_grammar_mask(LEFT_EMPTY)[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 18
+
+    def test_reset_tokens_block_same_way_cuts(self):
+        from beat_weaver.model.inference import _reset_tokens
+        from beat_weaver.model.tokenizer import _encode_note_token
+        m = _reset_tokens(LEFT_BASE, 1)  # just cut DOWN
+        for d in (1, 6, 7):  # down, down-left, down-right
+            assert m[_encode_note_token(LEFT_BASE, 0, 0, d)], d
+        for d in (0, 2, 3, 4, 5, 8):
+            assert not m[_encode_note_token(LEFT_BASE, 3, 2, d)], d
+        assert not m[_encode_note_token(RIGHT_BASE, 0, 0, 1)]
+        assert not _reset_tokens(LEFT_BASE, 8).any()
 
     def test_arc_penalty_geometry(self):
         from beat_weaver.model.inference import _arc_penalty
@@ -500,13 +514,28 @@ class TestGenerateFullSong:
         assert min(per(focus)) == 1 and max(per(focus)) == 4, per(focus)
         assert max(per(even)) - min(per(even)) <= 1, per(even)
 
+    def test_reset_gap_and_max_doubles(self, small_model):
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        bpm = 120.0
+        notes = generate_full_song(model, mel, "Expert", config, bpm, seed=1, two_stage=True, notes_per_beat=2.0,
+                                   lead_in_seconds=0, reset_seconds=0.5, max_doubles=0.2)
+        same = lambda a, b: a != 8 and b != 8 and (a == b or {a, b} in ({0, 4}, {0, 5}, {1, 6}, {1, 7}, {2, 4}, {2, 6}, {3, 5}, {3, 7}))
+        for c in (0, 1):
+            hand = [n for n in notes if n.color == c]
+            for a, b in zip(hand, hand[1:]):
+                assert not ((b.beat - a.beat) * 60 / bpm < 0.5 and same(a.cut_direction, b.cut_direction)), (a, b)
+        beats = [n.beat for n in notes]
+        hits = len(set(beats))
+        assert (len(beats) - hits) / hits <= 0.2 + 1 / hits
+
     def test_notes_per_second_overrides_notes_per_beat(self, small_model):
         model, config = small_model
         mel = torch.randn(80, config.max_audio_len)
         slow = generate_full_song(model, mel, "Expert", config, 60.0, seed=1, two_stage=True, notes_per_second=4.0, lead_in_seconds=0)
         fast = generate_full_song(model, mel, "Expert", config, 180.0, seed=1, two_stage=True, notes_per_second=4.0, lead_in_seconds=0)
-        per_beat = lambda ns, bpm: len(ns) / (max(n.beat for n in ns) + 1)
-        assert per_beat(slow, 60) > 2 * per_beat(fast, 180), (per_beat(slow, 60), per_beat(fast, 180))
+        per_beat = lambda ns, bpm: len({n.beat for n in ns}) / (max(n.beat for n in ns) + 1)  # hits: doubles depend on placement masks
+        assert per_beat(slow, 60) > 1.5 * per_beat(fast, 180), (per_beat(slow, 60), per_beat(fast, 180))  # 2.5 (capped) vs 1.33 per beat
 
     def test_end_seconds_drops_notes_after_the_music(self, small_model):
         import numpy as np
