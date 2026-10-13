@@ -212,3 +212,22 @@ class TestFixtureIntegration:
         # The fixture is a valid v2 map; it must not be flagged structurally corrupt.
         # (It contains a bomb _type=3 note and a wall — both legal.)
         assert not any("invalid _type" in i.message for i in report.structure_issues)
+
+
+def test_swing_checks_flag_speed_reaction_and_double_directionals(tmp_path):
+    import json
+    from beat_weaver.model.map_check import check_map_folder
+    bpm = 120.0
+    # Easy map: one hand hitting every 1/4 beat (eBPM 480) and always cutting down
+    notes = [{"_time": i * 0.25, "_lineIndex": 1, "_lineLayer": 0, "_type": 0, "_cutDirection": 1} for i in range(80)]
+    (tmp_path / "Easy.dat").write_text(json.dumps({"_version": "2.0.0", "_notes": notes, "_obstacles": [], "_events": []}))
+    (tmp_path / "song.ogg").write_bytes(b"")
+    info = {"_version": "2.0.0", "_beatsPerMinute": bpm, "_songFilename": "song.ogg", "_difficultyBeatmapSets": [{
+        "_beatmapCharacteristicName": "Standard", "_difficultyBeatmaps": [{
+            "_difficulty": "Easy", "_difficultyRank": 1, "_beatmapFilename": "Easy.dat",
+            "_noteJumpMovementSpeed": 10, "_noteJumpStartBeatOffset": -3.6}]}]}
+    (tmp_path / "Info.dat").write_text(json.dumps(info))
+    msgs = [i.message for i in check_map_folder(tmp_path).issues]
+    assert any("effective BPM" in m for m in msgs)
+    assert any("double directionals" in m for m in msgs)
+    assert any("reaction time" in m for m in msgs)

@@ -196,8 +196,10 @@ repeats), the loudest isolated hits become stacks, lower difficulties are thinne
 one (to each difficulty's target density, weakest beats first, hits removed whole so parity holds),
 and a pattern ladder (`TIERS`) reshapes every exported difficulty to what it may contain: Easy is
 up/down singles on its own side of the grid a beat apart, Normal adds horizontals, Hard adds
-diagonals, crossovers, the top row and stacks, Expert adds sliders, Expert+ adds towers and windows. Flags `--repeats`, `--emphasis`,
-`--sliders`, `--downmap`. See
+diagonals, crossovers, the top row and stacks, Expert adds sliders, Expert+ adds towers and windows; Easy
+and Normal are also held to 3 and 5 distinct hand/cell placements per 2 bars. Flags `--repeats`, `--emphasis`,
+`--sliders`, `--downmap`. `beat_weaver/model/lighting.py` then writes a rules-based lightshow into each
+difficulty's `_events` from the notes and the loudness envelope. See
 [docs/MAPPING_GUIDELINES.md](docs/MAPPING_GUIDELINES.md).
 
 ## Stage 3: trimming (rules)

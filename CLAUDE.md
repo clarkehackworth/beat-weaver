@@ -57,6 +57,7 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 - `beat_weaver.model.transformer` — AudioEncoder (Conformer or Transformer) + TokenDecoder + BeatWeaverModel (RoPE or sinusoidal PE)
 - `beat_weaver.model.inference` — autoregressive generation with grammar mask + windowed full-song generation
 - `beat_weaver.model.exporter` — token sequence or note list → playable v2 map folder (one or several difficulties; jump settings pin reaction time per difficulty)
+- `beat_weaver.model.lighting` — rules-based v2 lightshow from notes and loudness (on by default at export)
 - `beat_weaver.model.shaping` — post-decode rule passes from bsmg mapping guidelines: downmapping, repeated-section copy, emphasis (stacks/sliders), per-difficulty pattern ladder (`TIERS`/`gate_patterns`)
 - `beat_weaver.model.evaluate` — onset F1, NPS accuracy, parity, diversity metrics
 

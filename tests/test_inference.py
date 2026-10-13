@@ -749,3 +749,34 @@ class TestShaping:
         mel = torch.randn(80, 64)
         toks = generate(model, mel, "Expert", config, seed=1, drift_bias=2.0, momentum_bias=1.0, flow_window=1.0)
         assert toks[0] == START and (toks[-1] == END or len(toks) == config.max_seq_len)
+
+
+def test_hand_comfort_table_is_zero_mean_and_prefers_inner_forehand():
+    from beat_weaver.model.inference import _COMFORT, LEFT_BASE, RIGHT_BASE
+    from beat_weaver.model.tokenizer import COLS, ROWS, DIRS
+    for base in (LEFT_BASE, RIGHT_BASE):
+        m = _COMFORT[base]
+        notes = m[base: base + COLS * ROWS * DIRS]
+        assert abs(float(notes.mean())) < 1e-6
+        assert float(m[: base].abs().sum()) == 0.0 if base == LEFT_BASE else True
+    def tok(base, x, y, d):
+        return base + (x * ROWS + y) * DIRS + d
+    L = _COMFORT[LEFT_BASE]
+    assert L[tok(LEFT_BASE, 1, 0, 1)] > L[tok(LEFT_BASE, 0, 0, 1)]  # down-cut: inner lane over outer
+    assert L[tok(LEFT_BASE, 0, 1, 0)] > L[tok(LEFT_BASE, 1, 1, 0)]  # up-cut: outer lane over inner
+    assert L[tok(LEFT_BASE, 1, 2, 1)] < L[tok(LEFT_BASE, 1, 1, 1)]  # down-cut on the top row is strain
+    R = _COMFORT[RIGHT_BASE]
+    assert R[tok(RIGHT_BASE, 2, 0, 1)] > R[tok(RIGHT_BASE, 3, 0, 1)]
+
+
+    def test_ebpm_gap_keeps_one_hand_from_swinging_twice_in_a_row(self, small_model):
+        from beat_weaver.model.tokenizer import decode_tokens
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        for seed in range(5):
+            tokens = generate(model, mel, "Expert", config, temperature=1.5, seed=seed, ebpm_gap=4)
+            notes = sorted(decode_tokens(tokens, 120.0), key=lambda n: n.beat)
+            for color in (0, 1):
+                h = [n for n in notes if n.color == color]
+                for a, b in zip(h, h[1:]):
+                    assert b.beat - a.beat >= 0.25 - 1e-6 or abs(b.beat - a.beat) < 1e-6, (seed, a, b)

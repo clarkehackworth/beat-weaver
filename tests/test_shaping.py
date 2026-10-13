@@ -186,3 +186,13 @@ def test_emphasize_towers_and_windows_only_on_expert_plus():
     gated = shaping.gate_patterns(plus, BPM, "Expert")
     assert max(len(h) for h in shaping._hits(gated)) <= 2
     assert not any(abs(a.x - b.x) == 2 for h in shaping._hits(gated) for a in h for b in h)
+
+
+def test_gate_patterns_limits_distinct_cells_on_easy():
+    # left hand wanders over 4 cells within 2 bars; Easy allows 3 (hand, cell) placements in total
+    notes = [N(i * 1.0, i % 2, i % 2, 0, (1, 0)[i % 2]) for i in range(8)] + [N(i * 1.0 + 0.5, 2 + i % 2, 0, 1, 1) for i in range(8)]
+    out = shaping.gate_patterns(notes, BPM, "Easy")
+    assert len({(n.color, n.x, n.y) for n in out}) <= 3
+    assert len(out) == 16
+    hard = shaping.gate_patterns(notes, BPM, "Hard")
+    assert len({(n.color, n.x, n.y) for n in hard}) == 4

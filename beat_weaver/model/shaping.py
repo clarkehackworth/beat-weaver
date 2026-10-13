@@ -161,12 +161,14 @@ def downmap_ladder(top_notes: list[Note], bpm: float, top: str, wanted: list[str
 #   max_jump    lanes a hand may move between consecutive swings
 #   min_gap     beats between consecutive swings (either hand); closer hits are dropped
 #   towers      3-note same-colour stacks and 2-note windows (one-cell gap) on the biggest moments
+#   max_cells   distinct (hand, cell) placements per 2 bars; extras move to the hand's commonest cell
+#               (bsmg downmapping: 2-3 unique patterns per half-jump at Easy, 4-5 at Normal)
 TIERS = {
-    "Easy": dict(cuts={0, 1, 8}, own_half=True, top_row=False, stacks=False, sliders=False, max_doubles=0.18, max_jump=1, min_gap=1.0, towers=False),
-    "Normal": dict(cuts={0, 1, 2, 3, 8}, own_half=True, top_row=False, stacks=False, sliders=False, max_doubles=0.20, max_jump=2, min_gap=0.5, towers=False),
-    "Hard": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=False, max_doubles=None, max_jump=3, min_gap=0.0, towers=False),
-    "Expert": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=True, max_doubles=None, max_jump=3, min_gap=0.0, towers=False),
-    "ExpertPlus": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=True, max_doubles=None, max_jump=3, min_gap=0.0, towers=True),
+    "Easy": dict(max_cells=3, cuts={0, 1, 8}, own_half=True, top_row=False, stacks=False, sliders=False, max_doubles=0.18, max_jump=1, min_gap=1.0, towers=False),
+    "Normal": dict(max_cells=5, cuts={0, 1, 2, 3, 8}, own_half=True, top_row=False, stacks=False, sliders=False, max_doubles=0.20, max_jump=2, min_gap=0.5, towers=False),
+    "Hard": dict(max_cells=None, cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=False, max_doubles=None, max_jump=3, min_gap=0.0, towers=False),
+    "Expert": dict(max_cells=None, cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=True, max_doubles=None, max_jump=3, min_gap=0.0, towers=False),
+    "ExpertPlus": dict(max_cells=None, cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=True, max_doubles=None, max_jump=3, min_gap=0.0, towers=True),
 }
 
 
@@ -182,6 +184,33 @@ def _simplify_cut(cut: int, allowed: set[int], prev: int | None) -> int:
     if cut in (2, 3) and {0, 1} <= allowed:
         return _REVERSE[prev] if prev in (0, 1) else 1
     return 8
+
+
+def _limit_cells(notes: list[Note], bpm: float, max_cells: int, window_beats: float = 8.0) -> list[Note]:
+    """Per window, keep at most ``max_cells`` distinct (hand, cell) placements: the rarest move to the hand's
+    commonest cell in that window, unless that cell is taken by the other hand at the same time."""
+    beat = 60.0 / bpm
+    out = list(notes)
+    by_window: dict[int, list[int]] = {}
+    for i, n in enumerate(out):
+        by_window.setdefault(int(n.time_seconds / beat // window_beats), []).append(i)
+    for idx in by_window.values():
+        counts: dict[tuple[int, int, int], int] = {}
+        for i in idx:
+            n = out[i]
+            counts[(n.color, n.x, n.y)] = counts.get((n.color, n.x, n.y), 0) + 1
+        keep = set(sorted(counts, key=lambda k: -counts[k])[:max_cells])
+        for i in idx:
+            n = out[i]
+            if (n.color, n.x, n.y) in keep:
+                continue
+            home = max((k for k in keep if k[0] == n.color), key=lambda k: counts[k], default=None)
+            if home is None:
+                continue
+            same_t = {(m.x, m.y) for m in out if abs(m.time_seconds - n.time_seconds) < 1e-3 and m is not n}
+            if (home[1], home[2]) not in same_t:
+                out[i] = replace(n, x=home[1], y=home[2])
+    return out
 
 
 def gate_patterns(notes: list[Note], bpm: float, difficulty: str) -> list[Note]:
@@ -244,6 +273,8 @@ def gate_patterns(notes: list[Note], bpm: float, difficulty: str) -> list[Note]:
         for n in placed:
             last[n.color] = n
         out.extend(placed)
+    if t["max_cells"]:
+        out = _limit_cells(out, bpm, t["max_cells"])
     out = repair_parity(_sorted(out), bpm)
     # a reversed diagonal can now point at the other hand's note; make such pairs straight cuts
     hits = _hits(out)

@@ -100,8 +100,8 @@ def _build_info_dat(
     }
 
 
-def _build_difficulty_dat(notes: list, version: str = "2.0.0") -> dict:
-    """Build a v2 difficulty .dat structure from decoded notes."""
+def _build_difficulty_dat(notes: list, version: str = "2.0.0", events: list[dict] | None = None) -> dict:
+    """Build a v2 difficulty .dat structure from decoded notes (and optional lighting events)."""
     v2_notes = []
     for note in notes:
         v2_notes.append({
@@ -116,7 +116,7 @@ def _build_difficulty_dat(notes: list, version: str = "2.0.0") -> dict:
         "_version": version,
         "_notes": sorted(v2_notes, key=lambda n: n["_time"]),
         "_obstacles": [],
-        "_events": [],
+        "_events": events or [],
     }
 
 
@@ -168,6 +168,7 @@ def export_notes(
     audio_path: Path,
     output_dir: Path,
     difficulty: str = "Expert",
+    events: dict[str, list[dict]] | None = None,
 ) -> Path:
     """Export a note list to a playable v2 Beat Saber map folder.
 
@@ -181,6 +182,7 @@ def export_notes(
         audio_path: Path to the audio file.
         output_dir: Where to create the map folder.
         difficulty: Difficulty name.
+        events: Optional {difficulty: v2 lighting events} (see ``lighting.light_events``).
 
     Returns:
         Path to the created map folder.
@@ -192,5 +194,6 @@ def export_notes(
     info = _build_info_dat(song_name, bpm, list(by_diff), audio_filename)
     (output_dir / "Info.dat").write_text(json.dumps(info, indent=2), encoding="utf-8")
     for d, ns in by_diff.items():
-        (output_dir / f"{d}.dat").write_text(json.dumps(_build_difficulty_dat(ns), indent=2), encoding="utf-8")
+        dat = _build_difficulty_dat(ns, events=(events or {}).get(d))
+        (output_dir / f"{d}.dat").write_text(json.dumps(dat, indent=2), encoding="utf-8")
     return output_dir

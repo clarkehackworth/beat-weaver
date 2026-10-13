@@ -39,6 +39,7 @@ BANDS = {
         'lateral': (0.250, 1.166),
         'inline': (0.000, 0.618),
         'zigzag3': (0.000, 4.919),
+        'ebpm': (0.0, 141.7),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -64,6 +65,7 @@ BANDS = {
         'lateral': (0.221, 1.114),
         'inline': (0.000, 0.553),
         'zigzag3': (0.000, 6.192),
+        'ebpm': (0.0, 239.0),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -89,6 +91,7 @@ BANDS = {
         'lateral': (0.469, 1.117),
         'inline': (0.000, 0.388),
         'zigzag3': (0.000, 8.071),
+        'ebpm': (0.0, 280.0),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -114,6 +117,7 @@ BANDS = {
         'lateral': (0.547, 1.201),
         'inline': (0.000, 0.353),
         'zigzag3': (0.665, 9.364),
+        'ebpm': (0.0, 308.0),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -139,6 +143,7 @@ BANDS = {
         'lateral': (0.427, 1.275),
         'inline': (0.000, 0.372),
         'zigzag3': (0.790, 10.860),
+        'ebpm': (0.0, 384.0),
         'energy_corr': (0.286, 1.0),
         'onset_hit': (0.621, 1.0),
         'lead_in': (1.6, 6.5),
@@ -147,7 +152,7 @@ BANDS = {
 
 WEIGHTS = {  # what matters most, per the alignment discussion
     "nps": 3, "gap_le_half": 2, "streams_per_min": 2, "longest_run": 1, "gap_1": 1, "gap_ge2": 1, "hand_gap_p10": 1,
-    "doubles": 1, "dots": 2, "far_cross": 2, "top_row": 1, "outer_cols": 1, "updown": 1,
+    "doubles": 1, "dots": 2, "far_cross": 2, "top_row": 1, "outer_cols": 1, "updown": 1, "ebpm": 2,
     # only scored when audio is available (see score(extra=...)); dropped from the denominator otherwise
     "energy_corr": 3, "onset_hit": 2, "lead_in": 1,
     "vision": 2, "vision_run3": 2,  # notes in the middle-row centre cells (hide what follows), and runs of 3+ hits there
@@ -268,6 +273,17 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
             lastd = d or lastd
             mono3 += run == 3
     pairs = max(len(dxs), 1)
+    # Effective BPM (bsmg: the BPM at which the hand's swings would be 1/2 notes = one per beat): 60 / the
+    # per-hand gap in seconds, p90 over swing gaps inside 2 s. Same-hand notes under 0.3 beat apart
+    # (stacks, sliders, towers) are one swing.
+    hgs = []
+    for hand in (0, 1):
+        swings = []
+        for x in sorted((x for x in n if x.color == hand), key=lambda x: x.time_seconds):
+            if not swings or x.time_seconds - swings[-1] >= 0.3 * beat:
+                swings.append(x.time_seconds)
+        hgs += [b - a for a, b in zip(swings, swings[1:]) if b - a <= 2.0]
+    ebpm = float(np.percentile(60.0 / np.array(hgs), 90)) if hgs else 0.0
     conv = sum(_converging(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     near = sum(_near_converging(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     return {
@@ -291,6 +307,7 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
         "lateral": float(np.mean(dxs)) if dxs else 0.0,
         "inline": inline / pairs,
         "zigzag3": 100.0 * mono3 / pairs,
+        "ebpm": ebpm,
     }
 
 

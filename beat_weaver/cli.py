@@ -224,8 +224,9 @@ def cmd_generate(args: argparse.Namespace) -> None:
         dynamics=args.dynamics, lead_in_seconds=args.lead_in, flow_penalty=args.flow_penalty,
         end_seconds=last_music_second(audio, sr),
         notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, column_max_run=args.column_max_run, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging,
-        reset_seconds=args.reset_gap, max_doubles=args.max_doubles, beat_floor=args.beat_floor, max_run=args.max_run,
+        reset_seconds=args.reset_gap, max_doubles=args.max_doubles, max_ebpm=args.max_ebpm, beat_floor=args.beat_floor, max_run=args.max_run,
         drift_bias=args.drift_bias, momentum_bias=args.momentum_bias, flow_window=args.flow_window,
+        hand_bias=args.hand_bias,
     )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
@@ -249,7 +250,11 @@ def cmd_generate(args: argparse.Namespace) -> None:
 
     song_name = Path(args.audio).stem
     output = Path(args.output) if args.output else Path(f"output/{song_name}")
-    export_notes(by_diff, bpm, song_name, Path(args.audio), output, args.difficulty)
+    events = None
+    if not args.no_lights:
+        from beat_weaver.model.lighting import light_events
+        events = {d: light_events(ns, bpm, strength, hop_s) for d, ns in by_diff.items()}
+    export_notes(by_diff, bpm, song_name, Path(args.audio), output, args.difficulty, events=events)
     counts = ", ".join(f"{d} {len(n)}" for d, n in by_diff.items())
     print(f"Generated map: {output} ({n_windows} window(s), notes: {counts})")
 
@@ -446,6 +451,8 @@ def main() -> None:
                      help="Seconds: a hand may not cut the same way (within 45 degrees) again this soon (0 = off)")
     gen.add_argument("--max-doubles", type=float, default=1.0,
                      help="Cap on the fraction of hits that use both hands (1.0 = no cap)")
+    gen.add_argument("--max-ebpm", type=float, default=0.0,
+                     help="Per-hand effective BPM cap: 60 / seconds between one hand's swings (0 = off; favourites p90: Easy 140, Normal 240, Hard 280, Expert 310, Expert+ 385)")
     gen.add_argument("--beat-floor", type=float, default=0.0,
                      help="Two-stage: a beat whose onset peak is under this fraction of its bar's peak gets no note (0 = every beat gets one)")
     gen.add_argument("--max-run", type=int, default=0,
@@ -456,6 +463,9 @@ def main() -> None:
                      help="Allow same-time notes on adjacent cells whose cuts are 135 deg apart with one aimed at the other (blocked by default)")
     gen.add_argument("--flow-penalty", type=float, default=2.0,
                      help="Logit penalty for a cut that breaks the saber's arc from the hand's last note (0 = off)")
+    gen.add_argument("--hand-bias", type=float, default=0.0,
+                     help="Logit weight on forehand/backhand placement comfort: forehand (down) cuts in the inner lanes, "
+                          "backhand (up) in the outer lanes, no down-cuts on the top row (0 = off)")
     gen.add_argument("--drift-bias", type=float, default=0.0,
                      help="Logit bonus for a hand moving one lane over in the direction it last moved, reversing at the "
                           "edges (piano streams / jumps). Favourites move ~0.75 lanes per swing; 0 = off")
@@ -474,6 +484,7 @@ def main() -> None:
                      help="Turn the loudest FRAC of isolated hits into stacks (0.08 is a good start; skipped on Easy/Normal; 0 = off)")
     gen.add_argument("--sliders", type=float, default=0.0, metavar="FRAC",
                      help="With --emphasis: FRAC of isolated hits on sustained sounds become 2-dot sliders (0 = off)")
+    gen.add_argument("--no-lights", action="store_true", help="Skip the rules-based lightshow (lighting.light_events)")
     gen.add_argument("--dynamics", type=float, default=1.0,
                      help="Two-stage: how much each bar's note budget follows the music (0 = flat/staccato, 1 = full)")
     gen.add_argument("--lead-in", type=float, default=2.0,

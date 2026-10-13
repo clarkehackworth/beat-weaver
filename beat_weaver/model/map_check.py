@@ -84,11 +84,50 @@ class MapReport:
         return "\n".join(lines)
 
 
+# Per-hand effective BPM ceilings (favourites p90, see beat_sim/rhythm.py BANDS 'ebpm') with 10% headroom.
+MAX_EBPM = {"Easy": 155, "Normal": 265, "Hard": 310, "Expert": 340, "ExpertPlus": 425}
+REACTION_MS = (400, 1500)  # bsmg jump settings: Expert+ 500-600 ms up to Easy 1200 ms
+# share of a hand's swings that repeat the previous cut inside 1.5 beats (favourites p90 per difficulty)
+DOUBLE_DIRECTIONAL_RATE = {"Easy": 0.03, "Normal": 0.03, "Hard": 0.07, "Expert": 0.06, "ExpertPlus": 0.11}
+
+
+def _swing_checks(notes: list[dict], difficulty: str, bpm: float, add) -> None:
+    """Per-hand speed and parity: effective BPM over 2 s windows and double directionals within 1.5 beats."""
+    if bpm <= 0:
+        return
+    beat = 60.0 / bpm
+    dd = swings_total = 0
+    gaps: list[float] = []
+    for color in (0, 1):
+        hand = sorted((n for n in notes if n.get("_type") == color and _is_num(n.get("_time"))), key=lambda n: n["_time"])
+        swings: list[dict] = []
+        for n in hand:
+            if not swings or (n["_time"] - swings[-1]["_time"]) >= 0.3:
+                swings.append(n)
+        for a, b in zip(swings, swings[1:]):
+            g = (b["_time"] - a["_time"]) * beat
+            if g <= 2.0:
+                gaps.append(g)
+            swings_total += 1
+            ca, cb = a.get("_cutDirection"), b.get("_cutDirection")
+            if b["_time"] - a["_time"] <= 1.5 and ca == cb and ca in range(8):
+                dd += 1
+    if gaps:
+        gaps.sort()
+        ebpm = 60.0 / gaps[max(0, int(len(gaps) * 0.1) - 1)]  # p90 of 60/gap
+        cap = MAX_EBPM.get(difficulty)
+        if cap and ebpm > cap:
+            add(difficulty, "playability", f"effective BPM {ebpm:.0f} above {cap} for {difficulty}", 1)
+    if swings_total and dd / swings_total > DOUBLE_DIRECTIONAL_RATE.get(difficulty, 0.06):
+        add(difficulty, "playability", "double directionals (same cut twice by one hand within 1.5 beats)", dd)
+
+
 def check_difficulty_notes(
     notes: list[dict],
     *,
     difficulty: str,
     add,
+    bpm: float = 0.0,
 ) -> list[float]:
     """Run structural + playability checks over one difficulty's ``_notes``.
 
@@ -185,6 +224,7 @@ def check_difficulty_notes(
         add(difficulty, "playability", "crossed hands (red on right + blue on left at same beat)", crossed)
     if wide:
         add(difficulty, "playability", "wide doubles (same-color notes one swipe cannot cover)", wide)
+    _swing_checks(notes, difficulty, bpm, add)
 
     return beats
 
@@ -210,7 +250,7 @@ def check_difficulty_file(path: Path, *, difficulty: str, bpm: float, add) -> li
     if not isinstance(notes, list):
         add(difficulty, "structure", "_notes is not a list")
         return []
-    return check_difficulty_notes(notes, difficulty=difficulty, add=add)
+    return check_difficulty_notes(notes, difficulty=difficulty, add=add, bpm=bpm)
 
 
 def check_map_folder(folder: Path, *, check_ladder: bool = True) -> MapReport:
@@ -246,11 +286,15 @@ def check_map_folder(folder: Path, *, check_ladder: bool = True) -> MapReport:
 
     # Collect difficulties from the v2 _difficultyBeatmapSets layout.
     diffs: dict[str, str] = {}
+    bmap_settings: dict[str, tuple[float, float]] = {}
     for bset in info.get("_difficultyBeatmapSets", []):
         for bmap in bset.get("_difficultyBeatmaps", []):
             d = bmap.get("_difficulty", "")
             if d:
                 diffs[d] = bmap.get("_beatmapFilename", "")
+                njs, off = bmap.get("_noteJumpMovementSpeed"), bmap.get("_noteJumpStartBeatOffset", 0)
+                if _is_num(njs) and njs > 0 and _is_num(off):
+                    bmap_settings[d] = (float(njs), float(off))
     if not diffs:
         add("Info", "structure", "no difficultyBeatmapSets/_difficultyBeatmaps entries")
         return report
@@ -266,6 +310,14 @@ def check_map_folder(folder: Path, *, check_ladder: bool = True) -> MapReport:
                     rank = bmap.get("_difficultyRank")
         if expected_rank is not None and rank is not None and rank != expected_rank:
             add(d, "structure", f"difficultyRank {rank} != expected {expected_rank} for {d}")
+        if bpm and bmap_settings.get(d):
+            njs, offset = bmap_settings[d]
+            hjd = 4.0
+            while njs * (60.0 / bpm) * hjd > 17.999:
+                hjd /= 2
+            reaction = max(hjd + offset, 0.25) * 60.0 / bpm * 1000
+            if not REACTION_MS[0] <= reaction <= REACTION_MS[1]:
+                add(d, "playability", f"reaction time {reaction:.0f} ms outside {REACTION_MS[0]}-{REACTION_MS[1]} ms (NJS {njs}, offset {offset})")
         fname = diffs[d]
         path = folder / fname
         if not path.exists():

@@ -182,6 +182,40 @@ def _drift_bonus(base: int, prev_cell: tuple[int, int] | None, drift: int) -> to
     return m
 
 
+def _hand_comfort(base: int) -> torch.Tensor:
+    """(VOCAB_SIZE,) placement comfort for one hand (bsmg basic-mapping "Difficulty", intermediate "Handedness").
+
+    Forehand swings (down, down-diagonals) sit naturally in the inner lanes, backhand swings (up,
+    up-diagonals) in the outer lanes; a down-cut on the top row and an up-cut on the bottom row are
+    strain. Horizontal cuts facing away from the body's centre on the outer lane are a reach. +1
+    comfortable, -1 strained, zero-mean over the hand's note tokens so it never adds notes.
+    """
+    m = torch.zeros(VOCAB_SIZE)
+    left = base == LEFT_BASE
+    inner, outer = (1, 0) if left else (2, 3)
+    outward = 2 if left else 3  # the horizontal cut pointing away from the centre
+    for x in range(COLS):
+        for y in range(ROWS):
+            for d in range(DIRS):
+                v = 0.0
+                fore, back = d in (1, 6, 7), d in (0, 4, 5)
+                if fore and x == inner or back and x == outer:
+                    v += 1.0
+                if fore and x == outer or back and x == inner:
+                    v -= 0.5
+                if fore and y == 2 or back and y == 0:
+                    v -= 1.0
+                if d == outward and x == outer:
+                    v -= 1.0
+                m[base + (x * ROWS + y) * DIRS + d] = v
+    notes = slice(base, base + COLS * ROWS * DIRS)
+    m[notes] -= m[notes].mean()
+    return m
+
+
+_COMFORT = {LEFT_BASE: _hand_comfort(LEFT_BASE), RIGHT_BASE: _hand_comfort(RIGHT_BASE)}
+
+
 # Rotation sense between two cuts: sign of the 2-D cross product (counter-clockwise > 0). Dots are 0.
 _ROT = torch.sign(_CUT_UNIT[:, 0:1] * _CUT_UNIT[:, 1].unsqueeze(0) - _CUT_UNIT[:, 1:2] * _CUT_UNIT[:, 0].unsqueeze(0))
 MOMENTUM_TENSION = 3  # same-sense rotations in a row before the wrist is wound up and should unwind
@@ -495,11 +529,13 @@ def generate(
     block_near_converging: bool = True,
     reset_gap: int = 0,
     max_doubles: float = 1.0,
+    ebpm_gap: int = 0,
     beat_floor: float = 0.0,
     max_run: int = 0,
     drift_bias: float = 0.0,
     momentum_bias: float = 0.0,
     flow_window: float = 1.5,
+    hand_bias: float = 0.0,
 ) -> list[int]:
     """Generate a token sequence autoregressively.
 
@@ -526,6 +562,9 @@ def generate(
         reset_gap: frames (1/16 beat). A hand's note this soon after its last
             one may not cut within 45 degrees of that cut (forced reset). The
             arc penalty alone left ~4 resets per map. 0 = off.
+        ebpm_gap: frames (1/16 beat) a hand must wait between swings (bsmg swing speed: 60 / max eBPM
+            seconds). A hand that swung more recently sits this slot out unless the other hand also did
+            (0 = off).
         max_doubles: cap on the fraction of hits that use both hands. The
             doubles rate otherwise swings 0.1-0.8 by song, and a Hard with 0.8
             doubles came out denser than the Expert. 1.0 = off.
@@ -665,6 +704,8 @@ def generate(
             hand_base = RIGHT_BASE
         else:
             hand_base = None
+        if hand_base is not None and hand_bias > 0:
+            next_logits += hand_bias * _COMFORT[hand_base].to(device)
         if hand_base is not None and last_cell[hand_base] is not None:
             frame = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
             gap_beats = (frame - last_frame[hand_base]) / beat_frames
@@ -693,6 +734,17 @@ def generate(
                 if col_run[base] >= column_max_run:
                     x = last_cell[base][0]
                     next_logits[base + x * 27: base + (x + 1) * 27] = float("-inf")
+
+        # Swing speed: a hand that swung within 60/max_ebpm s sits this slot out (the other hand takes it)
+        if ebpm_gap > 0:
+            frame = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
+            if POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT:
+                if last_cell[LEFT_BASE] is not None and frame - last_frame[LEFT_BASE] < ebpm_gap \
+                        and not (last_cell[RIGHT_BASE] is not None and frame - last_frame[RIGHT_BASE] < ebpm_gap):
+                    next_logits[LEFT_BASE: LEFT_BASE + LEFT_COUNT] = float("-inf")
+            elif LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT:  # the slot already holds a note
+                if last_cell[RIGHT_BASE] is not None and frame - last_frame[RIGHT_BASE] < ebpm_gap:
+                    next_logits[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] = float("-inf")
 
         # Parity: no same-way cut by a hand that just cut, unless it had time to reset
         if reset_gap > 0:
@@ -799,11 +851,13 @@ def generate_full_song(
     block_near_converging: bool = True,
     reset_seconds: float = 0.0,
     max_doubles: float = 1.0,
+    max_ebpm: float = 0.0,
     beat_floor: float = 0.0,
     max_run: int = 0,
     drift_bias: float = 0.0,
     momentum_bias: float = 0.0,
     flow_window: float = 1.5,
+    hand_bias: float = 0.0,
 ) -> list[Note]:
     """Generate a complete Beat Saber map by processing audio in overlapping windows.
 
@@ -829,6 +883,7 @@ def generate_full_song(
     # ponytail: min spacing between notes in frames (1/16 beats); ~an 8th at 140 BPM, a 1/4 at 80
     min_gap = max(2, round(min_gap_seconds * bpm / 60 * SUBDIVISIONS_PER_BAR / 4))
     reset_gap = round(reset_seconds * bpm / 60 * SUBDIVISIONS_PER_BAR / 4)
+    ebpm_gap = round(60.0 / max_ebpm * bpm / 60 * SUBDIVISIONS_PER_BAR / 4) if max_ebpm > 0 else 0
     if notes_per_second is not None:
         # Favourites hold notes/second roughly constant across tempos, so a slow song gets more notes per beat.
         notes_per_beat = min(notes_per_second * 60.0 / bpm, 2.5)  # above ~2.5/beat the 16th grid saturates into one run
@@ -850,8 +905,8 @@ def generate_full_song(
             audio_bars=_audio_bars(total_frames), onset_guidance=onset_guidance,
             two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap, dynamics=dynamics,
             flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
-            reset_gap=reset_gap, max_doubles=max_doubles, beat_floor=beat_floor, max_run=max_run,
-            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window,
+            reset_gap=reset_gap, max_doubles=max_doubles, ebpm_gap=ebpm_gap, beat_floor=beat_floor, max_run=max_run,
+            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias,
         )
         return [n for n in decode_tokens(tokens, bpm) if lead_in_beat <= n.beat < min(audio_end_beat, end_beat)]
 
@@ -888,8 +943,8 @@ def generate_full_song(
             audio_bars=_audio_bars(min(max_len, total_frames - start)),
             onset_guidance=onset_guidance, two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap,
             dynamics=dynamics, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
-            reset_gap=reset_gap, max_doubles=max_doubles, beat_floor=beat_floor, max_run=max_run,
-            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window,
+            reset_gap=reset_gap, max_doubles=max_doubles, ebpm_gap=ebpm_gap, beat_floor=beat_floor, max_run=max_run,
+            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias,
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)
