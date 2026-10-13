@@ -35,7 +35,7 @@ BANDS = {
         'top_row': (0.000, 0.058),
         'outer_cols': (0.287, 0.465),
         'far_cross': (0.000, 0.010),
-        'updown': (0.590, 0.819),
+        'updown': (0.590, 1.000),  # the Easy tier allows only up/down/dot cuts (shaping.TIERS), so all-vertical is by design
         'lateral': (0.250, 1.166),
         'inline': (0.000, 0.618),
         'zigzag3': (0.000, 4.919),

@@ -196,7 +196,7 @@ repeats), the loudest isolated hits become stacks, lower difficulties are thinne
 one (to each difficulty's target density, weakest beats first, hits removed whole so parity holds),
 and a pattern ladder (`TIERS`) reshapes every exported difficulty to what it may contain: Easy is
 up/down singles on its own side of the grid a beat apart, Normal adds horizontals, Hard adds
-diagonals, crossovers, the top row and stacks, Expert adds sliders. Flags `--repeats`, `--emphasis`,
+diagonals, crossovers, the top row and stacks, Expert adds sliders, Expert+ adds towers and windows. Flags `--repeats`, `--emphasis`,
 `--sliders`, `--downmap`. See
 [docs/MAPPING_GUIDELINES.md](docs/MAPPING_GUIDELINES.md).
 

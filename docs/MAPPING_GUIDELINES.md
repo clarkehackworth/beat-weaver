@@ -19,7 +19,7 @@ collected in the [backlog](#backlog) at the end.
 | Map real sounds. Most songs need only 1/1, 1/2, 1/4 precision; 1/8 and finer is usually overmapping. | Basic: Timing | Onset head on a 1/16 grid, `--min-gap`. No precision prior yet (backlog 8). |
 | Undermapping is fine, overmapping is not. | Basic | Scheduler budget `--notes-per-second`, rests on quiet beats (`--beat-floor`). |
 | Density follows the song's energy. | Intermediate: Rhythm choice | `--dynamics`; evaluator `energy_corr`, `onset_hit`. |
-| Emphasis ladder: single, 2-slider, stack, 3-slider, window, tower. Big sound, big swing. If everything is emphasized nothing is. | Basic: Emphasis | `--emphasis FRAC` stacks the loudest isolated hits; `--sliders FRAC` 2-dot sliders on held sounds (`shaping.emphasize`). Doubles via `--doubles-bias`/`--max-doubles`. Windows and towers: backlog. |
+| Emphasis ladder: single, 2-slider, stack, 3-slider, window, tower. Big sound, big swing. If everything is emphasized nothing is. | Basic: Emphasis | `--emphasis FRAC` stacks the loudest isolated hits; `--sliders FRAC` 2-dot sliders on held sounds; at Expert+ the loudest quarter of the emphasised hits become towers or windows (`shaping.emphasize`). Doubles via `--doubles-bias`/`--max-doubles`. |
 | Consistency: the same sound mapped the same way; similar sections mapped similarly, mirrored or varied within the motif. | Intermediate: Consistency, Structure | `--repeats SIM` finds repeated 4-bar blocks by beat-synchronous mel similarity and copies the first occurrence onto them, mirroring odd repeats (`shaping.find_repeats`, `repeat_sections`). |
 | Lead-in and tail: no notes in silence. | Basic | `--lead-in`, music-end trim; evaluator `lead_in`. |
 
@@ -69,10 +69,12 @@ dropped. Parity is repaired afterwards.
 | Normal | horizontals, 2-lane moves | + left, right | own half only | bottom two | ≤ 20% | 2 | 1/2 beat |
 | Hard | diagonals, inward crossovers, top row, stacks | all | free | all | free | 3 | none |
 | Expert | sliders, piano streams (drift bias) | all | free | all | free | 3 | none |
-| Expert+ | everything; windows and towers when backlog 15 lands | all | free | all | free | 3 | none |
+| Expert+ | towers (3 in an outer column) and windows (one-cell gap) on the loudest quarter of emphasised hits | all | free | all | free | 3 | none |
 
-Outward crossovers are masked at generation for every difficulty. Density per difficulty comes from
-`shaping.TARGET_NPS` (downmapping aims at the absolute target, not just a ratio of the source).
+Outward crossovers are masked at generation for every difficulty. Downmapping aims at the absolute density in
+`shaping.TARGET_NPS`, not just a ratio of the source. Easy's target (1.2/s) sits near the bottom of the favourites
+band on purpose: the favourites are an Expert+ player's picks and their Easy runs well above official Easy
+(~0.8/s). The evaluator's Easy `updown` band is open at the top because the tier makes every cut vertical.
 
 ## 5. Jump settings
 
@@ -101,7 +103,7 @@ Outward crossovers are masked at generation for every difficulty. Density per di
 
 ## Backlog
 
-Numbering continues from the review that produced this document. Items 1–6 shipped on 2026-10-12.
+Numbering continues from the review that produced this document. Items 1–6 and 15 shipped on 2026-10-12.
 
 7. **Forehand/backhand placement biases.** Backhand comfortable in outer lanes, forehand in inner lanes. Avoid inward-facing doubles on the edges and down-cuts on the top row. Small logit biases keyed on the parity state the decoder already tracks. (Basic: Difficulty, Intermediate: Handedness)
 8. **Rhythm precision prior.** Require a stronger onset score for 1/8 and 1/16 placements than for 1/2, 1/3 and 1/4; snap vocal-led sections to the intended rhythm. (Basic: Timing)
@@ -111,6 +113,6 @@ Numbering continues from the review that produced this document. Items 1–6 shi
 12. **Bombs, walls, arcs, chains.** Bomb resets at 2/3 of a gap for long rests; cosmetic bombs clear of saber paths; standard dodge and crouch walls with time to return; arcs on select sustained notes. Each needs tokenizer or exporter support. (Intermediate: Bombs, Arcs; Extended)
 13. **Mapping Extensions, 360/90 modes.** Multi-lane and rotation mapping. Separate characteristic; low priority. (Extended)
 14. **Lighting.** Rules-based lightshow from energy and onsets: back lasers on beats, ring spins on section changes, strobe on drops. No model change; most visible cheap win. (Basic Lighting pages)
-15. **Windows and towers.** Extend `shaping.emphasize` with 3-note windows (gap in the middle for vision) and towers for the very largest moments, Expert+ only. (Basic: Emphasis)
+15. ~~Windows and towers~~ shipped: `shaping.emphasize` with `difficulty="ExpertPlus"`, gated by `TIERS[..]["towers"]`.
 16. **Unique-pattern limit for Easy/Normal.** Count distinct (cell, cut) shapes per half-jump interval; collapse extras to the commonest pattern. (Downmapping)
 17. **Swing curvature term.** Penalise negative-curvature rotations above 45° in the arc penalty. (Intermediate: Rotations)

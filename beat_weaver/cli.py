@@ -238,7 +238,8 @@ def cmd_generate(args: argparse.Namespace) -> None:
         print(f"Repeated sections: {len(pairs)} block(s) of {args.repeat_bars} bars copied")
     if args.emphasis > 0 and args.difficulty not in ("Easy", "Normal"):
         before = len(notes)
-        notes = shaping.emphasize(notes, bpm, strength, hop_s, top_frac=args.emphasis, sustain_frac=args.sliders)
+        notes = shaping.emphasize(notes, bpm, strength, hop_s, top_frac=args.emphasis, sustain_frac=args.sliders,
+                                  difficulty=args.difficulty)
         print(f"Emphasis: {len(notes) - before} note(s) added as stacks/sliders")
     by_diff = {args.difficulty: notes}
     if args.downmap:

@@ -172,7 +172,12 @@ def check_difficulty_notes(
                 continue
             cols = {n.get("_lineIndex") for n in side_notes if _is_num(n.get("_lineIndex"))}
             rows = {n.get("_lineLayer") for n in side_notes if _is_num(n.get("_lineLayer"))}
-            if not (len(cols) == 1 and max(rows) - min(rows) <= 1) and \
+            cuts = {n.get("_cutDirection") for n in side_notes}
+            # a tower (one column, vertical cuts) or window (one row, horizontal cuts) is one swipe along the line
+            tower = len(cols) == 1 and cuts <= {0, 1, 8}
+            window = len(rows) == 1 and cuts <= {2, 3, 8}
+            if not tower and not window and \
+               not (len(cols) == 1 and max(rows) - min(rows) <= 1) and \
                not (len(rows) == 1 and max(cols) - min(cols) <= 1):
                 wide += 1
 

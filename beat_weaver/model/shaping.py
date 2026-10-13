@@ -24,7 +24,9 @@ DIFFS = ("Easy", "Normal", "Hard", "Expert", "ExpertPlus")
 # Favourites' notes-per-second band midpoints (beat_sim/rhythm.py BANDS). bsmg says ~20% fewer notes per
 # step, but the reference maps step harder at the bottom (Hard -> Normal -> Easy is x0.69, x0.65), so a
 # downmap keeps the ratio of these targets rather than a flat 0.8.
-TARGET_NPS = {"Easy": 1.46, "Normal": 2.23, "Hard": 3.25, "Expert": 4.16, "ExpertPlus": 5.22}
+TARGET_NPS = {"Easy": 1.20, "Normal": 2.23, "Hard": 3.25, "Expert": 4.16, "ExpertPlus": 5.22}
+# Easy sits near the bottom of the favourites band (1.09-1.83) rather than its midpoint: the favourites are an
+# Expert+ player's picks and their Easy runs well above official Easy (~0.8/s); play test said it felt hard.
 _REVERSE = {0: 1, 1: 0, 2: 3, 3: 2, 4: 7, 7: 4, 5: 6, 6: 5, 8: 8}
 
 
@@ -78,7 +80,7 @@ def downmap(notes: list[Note], bpm: float, src: str, dst: str, strength: np.ndar
     keep = [True] * len(hits)
     # ties thin evenly across the song (golden-ratio spread) instead of front to back
     order = sorted(range(len(hits)), key=lambda i: (score(hits[i]), (i * 0.6180339887) % 1.0))
-    order = order[: len(hits) - target]  # removal candidates; the rest are the key moments and always stay
+    order = [i for i in order if i != 0][: len(hits) - target]  # removal candidates; the first hit and the key moments stay
     removed = 0
     # two passes: first never remove neighbours (keeps streams even), then whatever is left
     for strict in (True, False):
@@ -158,12 +160,13 @@ def downmap_ladder(top_notes: list[Note], bpm: float, top: str, wanted: list[str
 #   max_doubles share of swings that are doubles (None = no cap)
 #   max_jump    lanes a hand may move between consecutive swings
 #   min_gap     beats between consecutive swings (either hand); closer hits are dropped
+#   towers      3-note same-colour stacks and 2-note windows (one-cell gap) on the biggest moments
 TIERS = {
-    "Easy": dict(cuts={0, 1, 8}, own_half=True, top_row=False, stacks=False, sliders=False, max_doubles=0.18, max_jump=1, min_gap=1.0),
-    "Normal": dict(cuts={0, 1, 2, 3, 8}, own_half=True, top_row=False, stacks=False, sliders=False, max_doubles=0.20, max_jump=2, min_gap=0.5),
-    "Hard": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=False, max_doubles=None, max_jump=3, min_gap=0.0),
-    "Expert": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=True, max_doubles=None, max_jump=3, min_gap=0.0),
-    "ExpertPlus": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=True, max_doubles=None, max_jump=3, min_gap=0.0),
+    "Easy": dict(cuts={0, 1, 8}, own_half=True, top_row=False, stacks=False, sliders=False, max_doubles=0.18, max_jump=1, min_gap=1.0, towers=False),
+    "Normal": dict(cuts={0, 1, 2, 3, 8}, own_half=True, top_row=False, stacks=False, sliders=False, max_doubles=0.20, max_jump=2, min_gap=0.5, towers=False),
+    "Hard": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=False, max_doubles=None, max_jump=3, min_gap=0.0, towers=False),
+    "Expert": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=True, max_doubles=None, max_jump=3, min_gap=0.0, towers=False),
+    "ExpertPlus": dict(cuts=set(range(9)), own_half=False, top_row=True, stacks=True, sliders=True, max_doubles=None, max_jump=3, min_gap=0.0, towers=True),
 }
 
 
@@ -204,6 +207,10 @@ def gate_patterns(notes: list[Note], bpm: float, difficulty: str) -> list[Note]:
             grp = [n for n in h if n.color == color]
             if len(grp) > 1 and (not t["stacks"] or (not t["sliders"] and all(n.cut_direction == 8 for n in grp))):
                 for n in grp[1:]:
+                    h.remove(n)
+            elif len(grp) > 1 and not t["towers"]:
+                wide = max(abs(a.x - b.x) + abs(a.y - b.y) for a in grp for b in grp) > 1
+                for n in grp[2 if not wide else 1:]:  # towers to stacks, windows to singles
                     h.remove(n)
     # doubles: thin to the cap, alternating which hand keeps the note
     if t["max_doubles"] is not None:
@@ -330,8 +337,10 @@ def mirror(n: Note) -> Note:
 # --- 3. emphasis ----------------------------------------------------------------------------------------------
 
 def emphasize(notes: list[Note], bpm: float, strength: np.ndarray, hop_s: float, top_frac: float = 0.08,
-              sustain_frac: float = 0.0, min_gap_beats: float = 0.9) -> list[Note]:
-    """Stacks on the loudest ``top_frac`` of hits; short dot sliders on sustained sounds.
+              sustain_frac: float = 0.0, min_gap_beats: float = 0.9, difficulty: str = "Expert") -> list[Note]:
+    """Stacks on the loudest ``top_frac`` of hits; short dot sliders on sustained sounds; on tiers with
+    ``towers`` (Expert+) the loudest quarter of those become towers (3 in a column, vertical cuts, outer
+    columns so no vision cell) or windows (a one-cell gap along a horizontal cut).
 
     A stack is a second same-colour, same-direction note adjacent to the first along the cut axis
     (bsmg "Stack": a bigger, faster swing). Only hits with at least ``min_gap_beats`` of room before
@@ -359,6 +368,7 @@ def emphasize(notes: list[Note], bpm: float, strength: np.ndarray, hop_s: float,
     ranked = sorted((i for i in range(len(hits)) if room[i]), key=lambda i: -loud(times[i]))
     n_stack = int(round(top_frac * len(hits)))
     stack_idx = set(ranked[:n_stack])
+    big_idx = set(ranked[: n_stack // 4]) if TIERS[difficulty]["towers"] else set()
     slide_idx: set[int] = set()
     if sustain_frac > 0:
         held = sorted((i for i in range(len(hits)) if room[i] and i not in stack_idx),
@@ -372,6 +382,19 @@ def emphasize(notes: list[Note], bpm: float, strength: np.ndarray, hop_s: float,
             if n.cut_direction == 8:
                 continue
             dx, dy = CUT_VEC[n.cut_direction]
+            if i in big_idx and n.cut_direction <= 1 and n.x in (0, 3):  # tower: the whole outer column
+                for yy in (0, 1, 2):
+                    if (n.x, yy) not in occupied:
+                        out.append(replace(n, y=yy))
+                        occupied.add((n.x, yy))
+                continue
+            if i in big_idx and n.cut_direction in (2, 3):  # window: same row, one cell gap, along the cut
+                for cell in ((n.x + 2 * dx, n.y), (n.x - 2 * dx, n.y)):
+                    if 0 <= cell[0] <= 3 and cell not in occupied and cell not in VISION_CELLS:
+                        out.append(replace(n, x=cell[0]))
+                        occupied.add(cell)
+                        break
+                continue
             if i in stack_idx and n.cut_direction <= 3:  # straight cuts only: a diagonal stack reads as a wide double
                 # second note sits in line with the first along the cut so one swipe covers both
                 for cell in ((n.x - dx, n.y - dy), (n.x + dx, n.y + dy)):

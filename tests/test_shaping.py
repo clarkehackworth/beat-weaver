@@ -172,3 +172,17 @@ def test_gate_patterns_clamps_lane_jumps_and_drops_sliders_on_hard():
     assert [n.x for n in out] == [2, 3]  # own half first, then at most 2 lanes
     hard = shaping.gate_patterns([N(0.0, 0, 0, 0, 8), N(0.0, 0, 1, 0, 8), N(0.0, 3, 0, 1, 1), N(0.0, 3, 1, 1, 1)], BPM, "Hard")
     assert len(hard) == 3  # slider collapsed, stack kept
+
+
+def test_emphasize_towers_and_windows_only_on_expert_plus():
+    notes = [N(i * 2.0, 0 if i % 2 else 3, 0, i % 2, 1 if i % 2 else 3) for i in range(20)]  # loud, roomy singles
+    strength = np.ones(2000); strength[::200] = 5.0  # hits 0, 10 ... loudest (hop 0.1 s -> t=0, 20)
+    plus = shaping.emphasize(notes, BPM, strength, 0.1, top_frac=0.4, difficulty="ExpertPlus")
+    exp = shaping.emphasize(notes, BPM, strength, 0.1, top_frac=0.4, difficulty="Expert")
+    sizes_plus = sorted(len(h) for h in shaping._hits(plus))
+    assert sizes_plus[-1] == 3 or any(abs(a.x - b.x) == 2 for h in shaping._hits(plus) for a in h for b in h)
+    assert max(len(h) for h in shaping._hits(exp)) <= 2
+    # the Expert gate trims a tower back to a stack and a window back to a single
+    gated = shaping.gate_patterns(plus, BPM, "Expert")
+    assert max(len(h) for h in shaping._hits(gated)) <= 2
+    assert not any(abs(a.x - b.x) == 2 for h in shaping._hits(gated) for a in h for b in h)
