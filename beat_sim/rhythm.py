@@ -40,7 +40,7 @@ BANDS = {
         'inline': (0.000, 0.618),
         'zigzag3': (0.000, 4.919),
         'ebpm': (0.0, 141.7),
-        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
+        'tangle': (0.000, 0.000), 'gallop': (0.000, 0.958), 'inline4': (0.000, 2.366), 'staircase': (0.000, 0.000),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -67,7 +67,7 @@ BANDS = {
         'inline': (0.000, 0.553),
         'zigzag3': (0.000, 6.192),
         'ebpm': (0.0, 239.0),
-        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
+        'tangle': (0.000, 0.000), 'gallop': (0.000, 3.246), 'inline4': (0.000, 3.345), 'staircase': (0.000, 0.000),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -94,7 +94,7 @@ BANDS = {
         'inline': (0.000, 0.388),
         'zigzag3': (0.000, 8.071),
         'ebpm': (0.0, 280.0),
-        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
+        'tangle': (0.000, 0.000), 'gallop': (0.000, 6.274), 'inline4': (0.000, 3.782), 'staircase': (0.000, 0.000),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -121,7 +121,7 @@ BANDS = {
         'inline': (0.000, 0.353),
         'zigzag3': (0.665, 9.364),
         'ebpm': (0.0, 308.0),
-        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
+        'tangle': (0.000, 0.001), 'gallop': (0.000, 7.785), 'inline4': (0.000, 3.368), 'staircase': (0.000, 0.000),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -148,7 +148,7 @@ BANDS = {
         'inline': (0.000, 0.372),
         'zigzag3': (0.790, 10.860),
         'ebpm': (0.0, 384.0),
-        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
+        'tangle': (0.000, 0.006), 'gallop': (0.000, 9.355), 'inline4': (0.000, 3.457), 'staircase': (0.000, 0.000),
         'energy_corr': (0.286, 1.0),
         'onset_hit': (0.621, 1.0),
         'lead_in': (1.6, 6.5),
@@ -165,9 +165,8 @@ WEIGHTS = {  # what matters most, per the alignment discussion
     "near_converging": 1,  # 45 deg off head-on with one cut aimed at the other note; legal but very hard
     # sideways motion of each hand between its own swings (bsmg "piano stream" / "jump" shapes vs "inline")
     "lateral": 2, "inline": 1, "zigzag3": 1,
-    # bsmg named bad patterns (backlog 10). Weight 0 until calibrated: run `python -m beat_sim.calibrate_bands`
-    # on the favourites folder and paste the bands in, then give them weight.
-    "tangle": 0, "gallop": 0, "inline4": 0, "staircase": 0,
+    # bsmg named bad patterns (backlog 10), bands from the 535 favourites (tangle/staircase: p90 is ~0, so any is out of band)
+    "tangle": 1, "gallop": 1, "inline4": 1, "staircase": 1,
 }
 # Graded instead of pass/fail: full credit in the middle half of the band, fading to 0 at either edge.
 # A 210-note stream passed Expert+'s (15, 205) band as "in band" and scored the same as a 60-note one.
