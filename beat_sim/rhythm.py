@@ -41,6 +41,7 @@ BANDS = {
         'zigzag3': (0.000, 4.919),
         'ebpm': (0.0, 141.7),
         'tangle': (0.000, 0.000), 'gallop': (0.000, 0.958), 'inline4': (0.000, 2.366), 'staircase': (0.000, 0.000),
+        'fine': (0.000, 0.016),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -68,6 +69,7 @@ BANDS = {
         'zigzag3': (0.000, 6.192),
         'ebpm': (0.0, 239.0),
         'tangle': (0.000, 0.000), 'gallop': (0.000, 3.246), 'inline4': (0.000, 3.345), 'staircase': (0.000, 0.000),
+        'fine': (0.000, 0.200),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -95,6 +97,7 @@ BANDS = {
         'zigzag3': (0.000, 8.071),
         'ebpm': (0.0, 280.0),
         'tangle': (0.000, 0.000), 'gallop': (0.000, 6.274), 'inline4': (0.000, 3.782), 'staircase': (0.000, 0.000),
+        'fine': (0.000, 0.286),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -122,6 +125,7 @@ BANDS = {
         'zigzag3': (0.665, 9.364),
         'ebpm': (0.0, 308.0),
         'tangle': (0.000, 0.001), 'gallop': (0.000, 7.785), 'inline4': (0.000, 3.368), 'staircase': (0.000, 0.000),
+        'fine': (0.000, 0.276),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -149,6 +153,7 @@ BANDS = {
         'zigzag3': (0.790, 10.860),
         'ebpm': (0.0, 384.0),
         'tangle': (0.000, 0.006), 'gallop': (0.000, 9.355), 'inline4': (0.000, 3.457), 'staircase': (0.000, 0.000),
+        'fine': (0.000, 0.511),
         'energy_corr': (0.286, 1.0),
         'onset_hit': (0.621, 1.0),
         'lead_in': (1.6, 6.5),
@@ -167,6 +172,7 @@ WEIGHTS = {  # what matters most, per the alignment discussion
     "lateral": 2, "inline": 1, "zigzag3": 1,
     # bsmg named bad patterns (backlog 10), bands from the 535 favourites (tangle/staircase: p90 is ~0, so any is out of band)
     "tangle": 1, "gallop": 1, "inline4": 1, "staircase": 1,
+    "fine": 1,  # share of notes at 1/8 beat or finer (offset-corrected, triplets on-grid)
 }
 # Graded instead of pass/fail: full credit in the middle half of the band, fading to 0 at either edge.
 # A 210-note stream passed Expert+'s (15, 205) band as "in band" and scored the same as a 60-note one.
@@ -321,6 +327,11 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
     sizes = [ts[tt] for tt in ut]
     gallop = sum(sizes[i] == 1 and sizes[i + 1] == 1 and sizes[i + 2] > 1 and g[i] <= 0.55 and g[i + 1] <= 0.55
                  for i in range(len(sizes) - 2))
+    # timing precision (bsmg Basic: Timing): most songs need only 1/1, 1/2, 1/4 (and triplets); 1/8 and finer is overmapping
+    # Scored at the beat offset that fits best: many community maps carry a constant offset that is not precision.
+    g = (np.array([x.beat for x in n])[None, :] - np.arange(0, 1, 0.01)[:, None]) % 1.0  # (offsets, notes)
+    on_grid = (np.abs(g * 4 - np.round(g * 4)) < 0.05) | (np.abs(g * 3 - np.round(g * 3)) < 0.05)
+    fine = float(1.0 - on_grid.mean(axis=1).max())
     # arm tangle: red right of blue at the same time with opposite vertical cuts, so the arms cross and pull apart
     tangle = sum(_tangle(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     # staircase hitbox abuse: two same-colour notes at one time on a diagonal, cut across the diagonal
@@ -353,6 +364,7 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
         "gallop": 100.0 * gallop / max(len(ut), 1),
         "inline4": 100.0 * inline4 / pairs,
         "staircase": staircase / max(len(ut), 1),
+        "fine": fine,
     }
 
 

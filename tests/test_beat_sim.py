@@ -246,3 +246,15 @@ def test_named_bad_pattern_counts():
     parked = [mk(1.0 + k * 0.5, 1, 1, 0, k % 2) for k in range(4)]
     assert stats(parked, bpm)["inline4"] > 0
     assert stats([mk(1.0 + k * 0.5, k % 4, 1, 0, k % 2) for k in range(4)], bpm)["inline4"] == 0.0
+
+
+def test_fine_timing_share():
+    from beat_sim.rhythm import stats
+
+    mk = lambda beat: Note(beat=beat, time_seconds=beat * 0.5, x=1, y=1, color=0, cut_direction=1)
+    on = [mk(b) for b in (1.0, 1.25, 1.5, 1.75, 2.0, 2.0 + 1 / 3, 2.0 + 2 / 3)]  # quarters and triplets
+    assert stats(on, 120.0)["fine"] == 0.0
+    mixed = on[:6] + [mk(3.125), mk(3.0625)]  # a 1/8 and a 1/16 position
+    assert abs(stats(mixed, 120.0)["fine"] - 2 / 8) < 1e-9
+    shifted = [mk(x.beat + 0.07) for x in on]  # a constant offset is not imprecision
+    assert stats(shifted, 120.0)["fine"] == 0.0
