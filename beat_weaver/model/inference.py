@@ -432,7 +432,7 @@ def _onset_schedule(
     beat = SUBDIVISIONS_PER_BAR // 4
     sums = torch.tensor([p[b0: b0 + SUBDIVISIONS_PER_BAR].sum().item() for b0 in range(0, n_frames, SUBDIVISIONS_PER_BAR)])
     if precision_prior > 0:
-        p = p * (PRECISION_WEIGHT ** precision_prior).repeat(n_frames // beat + 1)[:n_frames]
+        p = p * (PRECISION_WEIGHT.to(p.device) ** precision_prior).repeat(n_frames // beat + 1)[:n_frames]
     bars = [p[b0: b0 + SUBDIVISIONS_PER_BAR] for b0 in range(0, n_frames, SUBDIVISIONS_PER_BAR)]
     shape = (sums / sums.mean().clamp(min=1e-6)).clamp(min=0.0) ** dynamics if notes_per_beat else torch.ones_like(sums)
     shape = shape.clamp(max=2.0)
