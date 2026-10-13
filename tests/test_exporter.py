@@ -72,7 +72,7 @@ class TestExportMap:
         assert sets[0]["_beatmapCharacteristicName"] == "Standard"
         bm = sets[0]["_difficultyBeatmaps"][0]
         assert bm["_difficulty"] == "Expert"
-        assert bm["_noteJumpMovementSpeed"] == 16
+        assert bm["_noteJumpMovementSpeed"] == 15  # exporter._NJS_TABLE["Expert"]
 
     def test_difficulty_dat_notes(self, tmp_path, audio_file):
         tokens = [
