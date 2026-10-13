@@ -118,6 +118,20 @@ class TestGrammarMask:
         assert _arc_penalty(LEFT_BASE, (1, 1), 8).sum() == 0       # after an any-cut: nothing
         assert _arc_penalty(LEFT_BASE, None, 1).sum() == 0         # no previous cut
 
+    def test_arc_penalty_charges_negative_curvature(self):
+        from beat_weaver.model.inference import CURVATURE, _arc_penalty
+        from beat_weaver.model.tokenizer import _encode_note_token
+        tok = lambda x, y, d: _encode_note_token(LEFT_BASE, x, y, d)
+        pen = _arc_penalty(LEFT_BASE, (1, 1), 1)  # cut DOWN at (1,1); hand sits below it
+        # (3,2) is up-right: the wrist turned counter-clockwise (down -> up-right travel). Up-right keeps that
+        # sense (positive curvature); Right turns back clockwise at 90 degrees (negative) and pays CURVATURE.
+        assert pen[tok(3, 2, 5)] < 0.1
+        assert pen[tok(3, 2, 3)] > CURVATURE
+        # Down-left at (3,2) also turns back but is only 45 degrees from the last cut: no curvature charge
+        assert pen[tok(3, 2, 6)] <= 1.0
+        base = _arc_penalty(LEFT_BASE, (1, 1), 1)[tok(1, 1, 0)]  # straight reversal on the same cell: free
+        assert base < 0.01
+
     def test_bars_are_sequential_and_bounded(self):
         """Exactly one bar token is ever allowed: current_bar + 1, and none past the window."""
         for k in range(BAR_COUNT - 1):
@@ -254,6 +268,7 @@ class TestGenerateFullSong:
             decoder_ff_dim=64,
             dropout=0.0,
         )
+        torch.manual_seed(3)  # the statistical tests below (flow penalty halves repeats) need a fixed random model
         model = BeatWeaverModel(config)
         return model, config
 
@@ -428,6 +443,17 @@ class TestGenerateFullSong:
         m8 = _converging_right_tokens((1, 1), 8)  # left is a dot: only cuts that run over it are blocked
         assert m8[tok(2, 1, 2)] and not m8[tok(2, 1, 3)] and not m8[tok(0, 0, 1)]
 
+    def test_arm_tangle_mask(self):
+        from beat_weaver.model.inference import _converging_right_tokens
+        from beat_weaver.model.tokenizer import _encode_note_token
+        m = _converging_right_tokens((3, 1), 1)  # left note crossed to the right edge, cutting DOWN
+        assert m[_encode_note_token(RIGHT_BASE, 0, 1, 0)]       # right note on the left, cutting UP: tangle
+        assert m[_encode_note_token(RIGHT_BASE, 1, 2, 4)]       # up-left too (opposite vertical sense)
+        assert not m[_encode_note_token(RIGHT_BASE, 0, 1, 1)]   # same way down: arms move together
+        assert not m[_encode_note_token(RIGHT_BASE, 0, 1, 3)]   # horizontal: no vertical pull
+        assert not m[_encode_note_token(RIGHT_BASE, 2, 1, 0)]   # right note on its own side: fine
+        assert not _converging_right_tokens((1, 1), 1)[_encode_note_token(RIGHT_BASE, 0, 1, 0)]  # left not crossed
+
     def test_near_converging_is_blocked_by_default_and_allowed_by_flag(self):
         from beat_weaver.model.inference import _converging_right_tokens
         from beat_weaver.model.tokenizer import _encode_note_token
@@ -554,6 +580,18 @@ class TestGenerateFullSong:
         notes = generate_full_song(model, mel, "Expert", config, 120.0, seed=1, two_stage=True, notes_per_beat=2.0,
                                    lead_in_seconds=0.0, end_seconds=end)
         assert notes and max(n.time_seconds for n in notes) < end
+
+    def test_precision_prior_prefers_quarter_positions(self, small_model):
+        from beat_weaver.model.inference import _onset_schedule
+        model, config = small_model
+        n = 64
+        # every frame of bar 0 equally hot: without the prior the first pick per beat is arbitrary
+        model.onset_head = self._fixed_onset_head(list(range(n)), n)
+        memory = torch.zeros(1, n, config.encoder_dim)
+        sched = _onset_schedule(model, memory, n, notes_per_beat=2.0, min_gap=2, dynamics=0.0, precision_prior=1.0)
+        assert len(sched) == 8 and all(f % 4 == 0 for f in sched), sched  # 1/4-beat positions only
+        flat = _onset_schedule(model, memory, n, notes_per_beat=2.0, min_gap=2, dynamics=0.0)
+        assert len(flat) == 8, "the prior changes which frames are picked, not how many"
 
     @staticmethod
     def _fixed_onset_head(frames_high, n_frames):

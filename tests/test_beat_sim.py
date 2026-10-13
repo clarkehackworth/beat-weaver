@@ -221,3 +221,28 @@ def test_youtube_thumbnail_is_centre_cropped_to_a_square():
 
     out = Image.open(io.BytesIO(_square_jpeg(_jpeg(1280, 720))))
     assert out.size == (512, 512)
+
+
+def test_named_bad_pattern_counts():
+    from beat_sim.rhythm import stats
+
+    bpm, beat = 120.0, 0.5
+    mk = lambda t, x, y, c, d: Note(beat=t / beat, time_seconds=t, x=x, y=y, color=c, cut_direction=d)
+    # arm tangle: red at x=3 cutting down, blue at x=0 cutting up, same time
+    tangle = [mk(1.0, 3, 1, 0, 1), mk(1.0, 0, 1, 1, 0), mk(2.0, 1, 1, 0, 0), mk(2.0, 2, 1, 1, 0)]
+    st = stats(tangle, bpm)
+    assert st["tangle"] == 0.5 and st["staircase"] == 0.0
+    # staircase: two reds on a diagonal cut across it; a cut along the diagonal is clean
+    assert stats([mk(1.0, 1, 0, 0, 1), mk(1.0, 2, 1, 0, 1), mk(2.0, 0, 0, 1, 0)], bpm)["staircase"] == 0.5
+    assert stats([mk(1.0, 1, 0, 0, 5), mk(1.0, 2, 1, 0, 5), mk(2.0, 0, 0, 1, 0)], bpm)["staircase"] == 0.0
+    # gallop: single, single, double on consecutive quarter beats, three times
+    gal = []
+    for k in range(3):
+        t0 = 1.0 + k * 1.5
+        gal += [mk(t0, 1, 1, 0, 1), mk(t0 + 0.25, 2, 1, 1, 1), mk(t0 + 0.5, 1, 1, 0, 0), mk(t0 + 0.5, 2, 1, 1, 0)]
+    assert stats(gal, bpm)["gallop"] > 0
+    assert stats([mk(1.0 + k * 0.5, 1 + k % 2, 1, k % 2, 1) for k in range(8)], bpm)["gallop"] == 0.0
+    # inline spam: one hand parked on a cell for 4 swings in a row
+    parked = [mk(1.0 + k * 0.5, 1, 1, 0, k % 2) for k in range(4)]
+    assert stats(parked, bpm)["inline4"] > 0
+    assert stats([mk(1.0 + k * 0.5, k % 4, 1, 0, k % 2) for k in range(4)], bpm)["inline4"] == 0.0

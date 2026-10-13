@@ -59,6 +59,7 @@ def _note_tokens_on_cell(base: int, x: int, y: int) -> slice:
 
 
 FOLLOW_THROUGH = 0.75  # grid cells the hand continues past a note along its cut
+CURVATURE = 0.3  # arc penalty added for a negative-curvature rotation above 45 degrees (a repeat, 1.0, stays worst)
 VISION_CELLS = ((1, 1), (2, 1))  # middle row, centre columns: a note here hides the ones behind it
 
 
@@ -72,8 +73,19 @@ def _converging_right_tokens(left_cell: tuple[int, int], left_dir: int, block_ne
     ``block_near`` also blocks the near miss: cuts 135 degrees apart (45 off head-on) with
     at least one aimed at the other note. Legal, but the blades pass within inches;
     reference maps use it in ~4 of 1000 doubles.
+
+    Arm tangle (bsmg Basic): a LEFT note in the right half (crossed) with a vertical
+    cut blocks RIGHT notes in the left half cutting the other way vertically, so
+    the crossed arms never pull apart through each other.
     """
     m = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
+    if left_cell[0] >= 2 and left_dir < 8 and _CUT_VEC[left_dir][1] != 0:
+        for x in (0, 1):
+            for y in range(ROWS):
+                sl = _note_tokens_on_cell(RIGHT_BASE, x, y)
+                for d in range(8):
+                    if _CUT_VEC[d][1] * _CUT_VEC[left_dir][1] < 0:
+                        m[sl.start + d] = True
     # cut-through: a RIGHT cut whose blade path (1-2 cells along the cut) runs over the LEFT note's cell
     for x in range(COLS):
         for y in range(ROWS):
@@ -157,16 +169,26 @@ def _arc_penalty(base: int, prev_cell: tuple[int, int] | None, prev_direction: i
     favours a cut that sweeps through B along the way, which is the arc a mapper
     draws. Dots cost 0.5 (neutral). Returns a (VOCAB_SIZE,) tensor, non-zero only
     over this hand's 108 note tokens.
+
+    Swing curvature (bsmg Intermediate: Rotations): the wrist turns one way from
+    the last cut into the travel to B and should keep turning that way into the
+    new cut. When the new cut turns back the other way (negative curvature) and
+    the two cuts are more than 45 degrees apart, CURVATURE is added. A straight
+    reversal (180 degrees) has no sense change and costs nothing extra.
     """
     pen = torch.zeros(VOCAB_SIZE)
     if prev_direction < 0 or prev_direction == 8 or prev_cell is None:
         return pen
-    hand = torch.tensor(prev_cell, dtype=torch.float32) + FOLLOW_THROUGH * _CUT_UNIT[prev_direction]
+    prev = _CUT_UNIT[prev_direction]
+    hand = torch.tensor(prev_cell, dtype=torch.float32) + FOLLOW_THROUGH * prev
     cells = torch.tensor([[x, y] for x in range(COLS) for y in range(ROWS)], dtype=torch.float32)  # token order
     u = torch.nn.functional.normalize(cells - hand, dim=1)  # (12, 2) ideal cut direction per cell
     cos = u @ _CUT_UNIT.T  # (12, 9)
     cos[:, 8] = 0.0
-    pen[base: base + COLS * ROWS * DIRS] = ((1.0 - cos) / 2).reshape(-1)
+    turn_in = prev[0] * u[:, 1] - prev[1] * u[:, 0]  # (12,) sense of last cut -> travel
+    turn_out = u[:, 0:1] * _CUT_UNIT[:, 1] - u[:, 1:2] * _CUT_UNIT[:, 0]  # (12, 9) sense of travel -> new cut
+    negative = (turn_in.unsqueeze(1) * turn_out < -1e-6) & ((_CUT_UNIT @ prev) < 0.75).unsqueeze(0)  # > 45 deg
+    pen[base: base + COLS * ROWS * DIRS] = ((1.0 - cos) / 2 + CURVATURE * negative).clamp(max=1.0).reshape(-1)
     return pen
 
 
@@ -355,12 +377,18 @@ def _build_grammar_mask(
     return mask
 
 
+# Rhythm precision prior over the 16 frames of a beat: 1/1, 1/2 and 1/4 (quarter-beat) positions full weight,
+# 1/8 positions 0.6, 1/16 positions 0.4. Index = frame offset within the beat.
+PRECISION_WEIGHT = torch.tensor([1.0 if i % 4 == 0 else 0.6 if i % 2 == 0 else 0.4 for i in range(SUBDIVISIONS_PER_BAR // 4)])
+
+
 def _onset_schedule(
     model: BeatWeaverModel, memory: torch.Tensor, n_frames: int,
     notes_per_beat: float | None = None, min_gap: int = 4, dynamics: float = 1.0,
     stream_bias: float = 1.0,
     beat_focus: bool = False,
     beat_floor: float = 0.0,
+    precision_prior: float = 0.0,
 ) -> list[int]:
     """Stage 1 of two-stage decoding: the frames that get a note.
 
@@ -392,11 +420,20 @@ def _onset_schedule(
     bar's peak gets no note at all. 0 (off) guarantees every beat one note, so
     rests longer than a beat only appear when a whole bar's budget rounds to 0 and
     Expert+ plays as one 200-note line. 0.5 lets quiet beats rest.
+
+    ``precision_prior`` (bsmg Basic: Timing): most songs need only 1/1, 1/2 and
+    1/4 precision; 1/8 and finer is usually overmapping. Each frame's probability
+    is scaled by PRECISION_WEIGHT[offset within the beat] ** precision_prior
+    before ranking, so an off-beat 1/8 or 1/16 needs a stronger onset than a
+    quarter to be picked. 0 is off; 1 applies the table as is. The per-bar
+    budget is taken from the unscaled probabilities, so density is unchanged.
     """
     p = torch.sigmoid(model.onset_head(memory)[0, :n_frames, 0].float())
     beat = SUBDIVISIONS_PER_BAR // 4
+    sums = torch.tensor([p[b0: b0 + SUBDIVISIONS_PER_BAR].sum().item() for b0 in range(0, n_frames, SUBDIVISIONS_PER_BAR)])
+    if precision_prior > 0:
+        p = p * (PRECISION_WEIGHT ** precision_prior).repeat(n_frames // beat + 1)[:n_frames]
     bars = [p[b0: b0 + SUBDIVISIONS_PER_BAR] for b0 in range(0, n_frames, SUBDIVISIONS_PER_BAR)]
-    sums = torch.tensor([pb.sum().item() for pb in bars])
     shape = (sums / sums.mean().clamp(min=1e-6)).clamp(min=0.0) ** dynamics if notes_per_beat else torch.ones_like(sums)
     shape = shape.clamp(max=2.0)
     chosen: list[int] = []
@@ -548,6 +585,7 @@ def generate(
     momentum_bias: float = 0.0,
     flow_window: float = 1.5,
     hand_bias: float = 0.0,
+    precision_prior: float = 0.0,
 ) -> list[int]:
     """Generate a token sequence autoregressively.
 
@@ -638,7 +676,7 @@ def generate(
     n_bars = min(audio_bars or BAR_COUNT, BAR_COUNT)
     schedule = None
     if two_stage:
-        schedule = _cap_runs(_onset_schedule(model, memory, n_bars * SUBDIVISIONS_PER_BAR, notes_per_beat, min_gap, dynamics, stream_bias, beat_focus, beat_floor), max_run)
+        schedule = _cap_runs(_onset_schedule(model, memory, n_bars * SUBDIVISIONS_PER_BAR, notes_per_beat, min_gap, dynamics, stream_bias, beat_focus, beat_floor, precision_prior), max_run)
     sched_i = 0
 
     # Start with [START, DIFF_x]
@@ -870,6 +908,7 @@ def generate_full_song(
     momentum_bias: float = 0.0,
     flow_window: float = 1.5,
     hand_bias: float = 0.0,
+    precision_prior: float = 0.0,
 ) -> list[Note]:
     """Generate a complete Beat Saber map by processing audio in overlapping windows.
 
@@ -918,7 +957,7 @@ def generate_full_song(
             two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap, dynamics=dynamics,
             flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
             reset_gap=reset_gap, max_doubles=max_doubles, ebpm_gap=ebpm_gap, beat_floor=beat_floor, max_run=max_run,
-            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias,
+            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias, precision_prior=precision_prior,
         )
         return [n for n in decode_tokens(tokens, bpm) if lead_in_beat <= n.beat < min(audio_end_beat, end_beat)]
 
@@ -956,7 +995,7 @@ def generate_full_song(
             onset_guidance=onset_guidance, two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap,
             dynamics=dynamics, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
             reset_gap=reset_gap, max_doubles=max_doubles, ebpm_gap=ebpm_gap, beat_floor=beat_floor, max_run=max_run,
-            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias,
+            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias, precision_prior=precision_prior,
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)

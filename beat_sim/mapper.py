@@ -47,7 +47,7 @@ DENSITY_SCALE = {"Expert": 1.1, "ExpertPlus": 1.1}  # ponytail: generated nps la
 DENSITY_BONUS = {"Expert": 10.0, "ExpertPlus": 10.0}  # max points added to the ranking score (not the report)
 DENSITY_VARIANTS = (0.85, 1.0, 1.15)
 # bsmg-guideline shaping applied to every candidate (see beat_weaver/model/shaping.py and docs/MAPPING_GUIDELINES.md)
-SHAPING = {"drift_bias": 1.5, "momentum_bias": 0.5, "flow_window": 1.5, "hand_bias": 0.5, "repeats": 0.7, "emphasis": 0.08}
+SHAPING = {"drift_bias": 1.5, "momentum_bias": 0.5, "flow_window": 1.5, "hand_bias": 0.5, "precision_prior": 1.0, "repeats": 0.7, "emphasis": 0.08}
 DOWNMAP_FROM = {"Easy": "Hard", "Normal": "Hard", "Hard": "Hard"}  # ponytail: Hard is generated; Easy/Normal are thinned from it  # ponytail: two hedges around the preset; widen if winners sit at an edge
 
 

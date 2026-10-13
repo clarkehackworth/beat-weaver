@@ -226,7 +226,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, column_max_run=args.column_max_run, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging,
         reset_seconds=args.reset_gap, max_doubles=args.max_doubles, max_ebpm=args.max_ebpm, beat_floor=args.beat_floor, max_run=args.max_run,
         drift_bias=args.drift_bias, momentum_bias=args.momentum_bias, flow_window=args.flow_window,
-        hand_bias=args.hand_bias,
+        hand_bias=args.hand_bias, precision_prior=args.precision_prior,
     )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
@@ -457,6 +457,9 @@ def main() -> None:
                      help="Two-stage: a beat whose onset peak is under this fraction of its bar's peak gets no note (0 = every beat gets one)")
     gen.add_argument("--max-run", type=int, default=0,
                      help="Two-stage: longest run of notes within half a beat of each other; the run then rests a whole beat (0 = no cap)")
+    gen.add_argument("--precision-prior", type=float, default=0.0,
+                     help="Two-stage: weight on the rhythm precision prior; off-beat 1/8 and 1/16 frames need a stronger "
+                          "onset than 1/4 positions to be picked (0 = off, 1 = full table)")
     gen.add_argument("--beat-focus", action="store_true",
                      help="Two-stage: give a bar's extra notes to its strongest beats first, leaving rests between streams (Expert+)")
     gen.add_argument("--allow-near-converging", action="store_true",

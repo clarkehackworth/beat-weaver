@@ -16,7 +16,7 @@ collected in the [backlog](#backlog) at the end.
 
 | Guideline | Wiki | beat-weaver |
 |---|---|---|
-| Map real sounds. Most songs need only 1/1, 1/2, 1/4 precision; 1/8 and finer is usually overmapping. | Basic: Timing | Onset head on a 1/16 grid, `--min-gap`. No precision prior yet (backlog 8). |
+| Map real sounds. Most songs need only 1/1, 1/2, 1/4 precision; 1/8 and finer is usually overmapping. | Basic: Timing | Onset head on a 1/16 grid, `--min-gap`. `--precision-prior` scales each frame's onset probability by `inference.PRECISION_WEIGHT` (1/4 positions 1.0, 1/8 0.6, 1/16 0.4) before ranking, budget unchanged; mapper `SHAPING["precision_prior"]` 1.0. |
 | Undermapping is fine, overmapping is not. | Basic | Scheduler budget `--notes-per-second`, rests on quiet beats (`--beat-floor`). |
 | Density follows the song's energy. | Intermediate: Rhythm choice | `--dynamics`; evaluator `energy_corr`, `onset_hit`. |
 | Emphasis ladder: single, 2-slider, stack, 3-slider, window, tower. Big sound, big swing. If everything is emphasized nothing is. | Basic: Emphasis | `--emphasis FRAC` stacks the loudest isolated hits; `--sliders FRAC` 2-dot sliders on held sounds; at Expert+ the loudest quarter of the emphasised hits become towers or windows (`shaping.emphasize`). Doubles via `--doubles-bias`/`--max-doubles`. |
@@ -31,8 +31,8 @@ collected in the [backlog](#backlog) at the end.
 | Time scaling: resets are fine when the hand has had time (about 1.5 beats) to come back. | Intermediate: Spacing | `--flow-window` fades the flow penalty to 0 over the last beat of the window (default 1.5). |
 | Rotation amounts: 180° and 135° are safe at any speed; 90° maybe; 45° is a reset. Larger changes need more time. | Basic: Parity | Arc penalty is cosine-shaped so 180° is cheapest and 45° worst. |
 | Momentum: a wrist turning one way wants to keep turning, up to a point; then it must unwind. | Intermediate: Momentum and Tension | `--momentum-bias` rewards cuts that keep the rotation sense, flipping to a penalty after 3 same-sense turns. |
-| Swing curvature: positive (natural arc) fine to 135°; negative beyond 45° is harsh. | Intermediate: Rotations | Partly covered by the arc penalty. Explicit curvature term: backlog 6b. |
-| Avoid awkward same-colour curves, triangles (three cuts rotating one way), Shrado angles, staircase hitbox abuse, Loloppe notes. | Basic, Glossary | Momentum tension cap covers triangles. The rest: backlog 10. |
+| Swing curvature: positive (natural arc) fine to 135°; negative beyond 45° is harsh. | Intermediate: Rotations | Arc penalty adds `inference.CURVATURE` (0.3) when the new cut turns back against the sense of last-cut → travel and the two cuts are more than 45° apart; a 180° reversal is free. |
+| Avoid awkward same-colour curves, triangles (three cuts rotating one way), Shrado angles, staircase hitbox abuse, Loloppe notes. | Basic, Glossary | Momentum tension cap covers triangles. Evaluator `staircase` (same-colour same-time diagonal pair cut across the diagonal, per hit). Shrado angles and Loloppe notes: backlog 10. |
 
 ## 3. Spatial patterns
 
@@ -41,7 +41,7 @@ collected in the [backlog](#backlog) at the end.
 | Hands move. Streams sweep sideways (piano stream: alternating colour and direction across the grid), jumps change lane or row. A hand parked in one cell is "inline". | Glossary: Piano Stream, Jump, Inline | `--drift-bias` rewards landing one lane over in the hand's current drift direction, reversing at the edges. Evaluator `lateral` (mean lanes moved per same-hand swing, favourites Expert 0.55–1.20), `inline` (share that stays put, p90 0.35), `zigzag3` (monotonic 3-lane runs per 100 pairs, Expert 0.7–9.4). |
 | Vision blocks: nothing on the two centre middle cells that hides the next note. | Basic: Vision | `--vision-penalty`, `--vision-max-run`; evaluator `vision`, `vision_run3`. |
 | Crossovers: outward-facing cuts after crossing are near unhittable; inward is fine. Easy and Normal: none. | Basic, Downmapping | Outward crossover tokens masked; `far_cross` metric; downmapper drops crossovers for Easy/Normal. |
-| Handclaps, arm tangles, controller clash: hands converging on the same cell or crossing with opposite vertical cuts. | Basic | Shared cell masked; converging pairs masked; validator "crossed hands". Arm-tangle check: backlog 10. |
+| Handclaps, arm tangles, controller clash: hands converging on the same cell or crossing with opposite vertical cuts. | Basic | Shared cell masked; converging pairs masked (handclaps); validator "crossed hands". Arm tangle: decoder mask in `_converging_right_tokens` (crossed LEFT with a vertical cut blocks opposite-vertical RIGHT cuts in the left half), evaluator `tangle`. |
 | Cut-through: a cut whose blade path runs over the other colour's note (red above blue, both cutting up) hits the wrong note first. Favourites Expert/Expert+: 0.3% of doubles. | Basic: Hitbox | Decoder mask (`_converging_right_tokens`: 1–2 cells along either cut), evaluator `converging`, `shaping._resolve_collisions` after emphasis/repeats/parity repair (straighten, reverse, trim the stack, drop), validator "cut-through". |
 | Top row sparingly (shoulder strain), especially at Easy/Normal. Down-cuts on the top row and inward doubles on the edges are hard for short players. Forehand comfortable in the inner lanes, backhand in the outer. | Basic: Difficulty, Intermediate: Handedness | `top_row` metric; the ladder keeps Easy/Normal off the top row. `--hand-bias` adds a zero-mean comfort table to each hand's logits (`inference._hand_comfort`): forehand inner, backhand outer, no down-cut on the top row or up-cut on the bottom, no outward horizontal on the edge. |
 | Hitbox: no two notes of one colour that one swipe cannot cover. | Basic | Validator "wide doubles"; evaluator `converging`. |
@@ -88,7 +88,7 @@ band on purpose: the favourites are an Expert+ player's picks and their Easy run
 | Guideline | Wiki | beat-weaver |
 |---|---|---|
 | Effective BPM: 100–150 natural, 150–200 tiring, 200+ speed maps. Same-hand sequences feel much faster than alternating ones. | Intermediate: Swing Speed | Evaluator `ebpm` (p90 of 60 / per-hand swing gap, favourites p90: Easy 142, Normal 239, Hard 280, Expert 308, Expert+ 384); `--max-ebpm` masks a hand that swung too recently so the other hand takes the slot (mapper presets use the favourites p90); validator flags eBPM above the cap with 10% headroom. |
-| Gallops (two singles then a double) are hard and add unintended emphasis. | Glossary | A gallop is a same-hand gap under the eBPM cap, so `--max-ebpm` stops most of them. Explicit check: backlog 10. |
+| Gallops (two singles then a double) are hard and add unintended emphasis. | Glossary | `--max-ebpm` stops the fast ones. Evaluator `gallop` (single, single, double within half a beat of each other, per 100 hits). |
 | Leaning, swaying, crouching: regular, predictable, started on forehand swings. | Intermediate: Full Body Motion | Out of scope until walls exist: backlog 12. |
 | Bombs: represent a sound; keep 1/4 beat clear before and after notes; resets at 2/3 of the gap. | Intermediate: Bombs | No bombs generated: backlog 12. |
 | Arcs and chains: sparingly, for select swings. Walls: standard full-height and crouch only, never 3-wide, never the whole grid. | Extended, Basic | Not generated: backlog 12. |
@@ -106,16 +106,16 @@ band on purpose: the favourites are an Expert+ player's picks and their Easy run
 
 ## Backlog
 
-Numbering continues from the review that produced this document. Items 1–7, 9, 11, 14, 15 and 16 shipped on 2026-10-12.
+Numbering continues from the review that produced this document. Items 1–7, 9, 11, 14, 15 and 16 shipped on 2026-10-12; 8, 17 and most of 10 on 2026-10-13.
 
 7. ~~Forehand/backhand placement biases~~ shipped: `--hand-bias` (`inference._hand_comfort`), mapper `SHAPING["hand_bias"]` 0.5.
-8. **Rhythm precision prior.** Require a stronger onset score for 1/8 and 1/16 placements than for 1/2, 1/3 and 1/4; snap vocal-led sections to the intended rhythm. (Basic: Timing)
+8. ~~Rhythm precision prior~~ shipped: `--precision-prior` / `inference.PRECISION_WEIGHT`. Not done: snapping vocal-led sections to the intended rhythm (needs a vocal/beat-tracking signal).
 9. ~~Effective BPM cap~~ shipped: evaluator `ebpm`, `--max-ebpm` in generation (mapper presets per difficulty), validator check.
-10. **Named bad patterns as explicit checks.** Arm tangles, handclaps, gallops, staircase hitbox, inline spam, Shrado angle, Loloppe notes, triangles beyond the momentum cap. Evaluator counts plus masks where cheap. (Basic, Glossary)
+10. **Named bad patterns as explicit checks.** Shipped: evaluator `tangle`, `gallop`, `inline4` (4+ same-hand swings parked on one cell, per 100 pairs), `staircase`, plus the arm-tangle decoder mask. Handclaps are the existing `converging` metric/mask; triangles the momentum cap. The four new metrics carry weight 0 and `(0, 0)` placeholder bands in `beat_sim.rhythm` until `python -m beat_sim.calibrate_bands` is run on the favourites folder. Still open: Shrado angle and Loloppe notes need a precise geometric definition before a check can be written. (Basic, Glossary)
 11. ~~Validator additions~~ shipped: reaction-time range, max eBPM, double directionals within 1.5 beats. The density ladder already covered all five difficulties. Inline rate stays an evaluator metric only.
 12. **Bombs, walls, arcs, chains.** Bomb resets at 2/3 of a gap for long rests; cosmetic bombs clear of saber paths; standard dodge and crouch walls with time to return; arcs on select sustained notes. Each needs tokenizer or exporter support. (Intermediate: Bombs, Arcs; Extended)
 13. **Mapping Extensions, 360/90 modes.** Multi-lane and rotation mapping. Separate characteristic; low priority. (Extended)
 14. ~~Lighting~~ shipped: `lighting.light_events`, on by default, `--no-lights` to skip.
 15. ~~Windows and towers~~ shipped: `shaping.emphasize` with `difficulty="ExpertPlus"`, gated by `TIERS[..]["towers"]`.
 16. ~~Unique-pattern limit for Easy/Normal~~ shipped: `TIERS[..]["max_cells"]` (Easy 3, Normal 5 distinct hand/cell placements per 2 bars).
-17. **Swing curvature term.** Penalise negative-curvature rotations above 45° in the arc penalty. (Intermediate: Rotations)
+17. ~~Swing curvature term~~ shipped: `inference.CURVATURE` in `_arc_penalty`.

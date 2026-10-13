@@ -40,6 +40,7 @@ BANDS = {
         'inline': (0.000, 0.618),
         'zigzag3': (0.000, 4.919),
         'ebpm': (0.0, 141.7),
+        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -66,6 +67,7 @@ BANDS = {
         'inline': (0.000, 0.553),
         'zigzag3': (0.000, 6.192),
         'ebpm': (0.0, 239.0),
+        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -92,6 +94,7 @@ BANDS = {
         'inline': (0.000, 0.388),
         'zigzag3': (0.000, 8.071),
         'ebpm': (0.0, 280.0),
+        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -118,6 +121,7 @@ BANDS = {
         'inline': (0.000, 0.353),
         'zigzag3': (0.665, 9.364),
         'ebpm': (0.0, 308.0),
+        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -144,6 +148,7 @@ BANDS = {
         'inline': (0.000, 0.372),
         'zigzag3': (0.790, 10.860),
         'ebpm': (0.0, 384.0),
+        'tangle': (0.0, 0.0), 'gallop': (0.0, 0.0), 'inline4': (0.0, 0.0), 'staircase': (0.0, 0.0),  # uncalibrated
         'energy_corr': (0.286, 1.0),
         'onset_hit': (0.621, 1.0),
         'lead_in': (1.6, 6.5),
@@ -160,6 +165,9 @@ WEIGHTS = {  # what matters most, per the alignment discussion
     "near_converging": 1,  # 45 deg off head-on with one cut aimed at the other note; legal but very hard
     # sideways motion of each hand between its own swings (bsmg "piano stream" / "jump" shapes vs "inline")
     "lateral": 2, "inline": 1, "zigzag3": 1,
+    # bsmg named bad patterns (backlog 10). Weight 0 until calibrated: run `python -m beat_sim.calibrate_bands`
+    # on the favourites folder and paste the bands in, then give them weight.
+    "tangle": 0, "gallop": 0, "inline4": 0, "staircase": 0,
 }
 # Graded instead of pass/fail: full credit in the middle half of the band, fading to 0 at either edge.
 # A 210-note stream passed Expert+'s (15, 205) band as "in band" and scored the same as a 60-note one.
@@ -200,6 +208,20 @@ def _converging(l: Note, r: Note) -> bool:
         return True
     lv, rv = _CUT[l.cut_direction], _CUT[r.cut_direction]
     return lv[0] * dx + lv[1] * dy > 0 and rv[0] * -dx + rv[1] * -dy > 0
+
+
+def _tangle(l: Note, r: Note) -> bool:
+    if l.x <= r.x or l.cut_direction not in _CUT or r.cut_direction not in _CUT:
+        return False
+    return _CUT[l.cut_direction][1] * _CUT[r.cut_direction][1] < 0
+
+
+def _staircase(a: Note, b: Note) -> bool:
+    dx, dy = b.x - a.x, b.y - a.y
+    if abs(dx) != 1 or abs(dy) != 1 or a.cut_direction not in _CUT:
+        return False
+    v = _CUT[a.cut_direction]
+    return (v[0], v[1]) not in ((dx, dy), (-dx, -dy))  # a cut along the diagonal is one clean swipe
 
 
 def _cuts_through(a: Note, b: Note) -> bool:
@@ -268,17 +290,19 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
         by_t.setdefault(round(x.time_seconds, 3), []).append(x)
     # Lateral motion per hand between its own consecutive swings within a beat: how far it moves
     # sideways, how often it stays put (inline), and monotonic 3+ lane runs (the piano-stream shape).
-    dxs, inline, mono3 = [], 0, 0
+    dxs, inline, mono3, inline4 = [], 0, 0, 0
     for hand in (0, 1):
         h = sorted((x for x in n if x.color == hand), key=lambda x: x.time_seconds)
-        run, lastd = 1, 0
+        run, lastd, parked = 1, 0, 1
         for a, b in zip(h, h[1:]):
             if (b.time_seconds - a.time_seconds) / beat > 1.01:
-                run, lastd = 1, 0
+                run, lastd, parked = 1, 0, 1
                 continue
             d = b.x - a.x
             dxs.append(abs(d))
             inline += d == 0 and b.y == a.y
+            parked = parked + 1 if d == 0 and b.y == a.y else 1  # inline spam: 4+ swings parked on one cell
+            inline4 += parked == 4
             run = run + 1 if d and (lastd == 0 or (d > 0) == (lastd > 0)) else (2 if d else 1)
             lastd = d or lastd
             mono3 += run == 3
@@ -294,6 +318,14 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
                 swings.append(x.time_seconds)
         hgs += [b - a for a, b in zip(swings, swings[1:]) if b - a <= 2.0]
     ebpm = float(np.percentile(60.0 / np.array(hgs), 90)) if hgs else 0.0
+    # gallop (bsmg glossary): two singles then a double, all within half a beat of each other
+    sizes = [ts[tt] for tt in ut]
+    gallop = sum(sizes[i] == 1 and sizes[i + 1] == 1 and sizes[i + 2] > 1 and g[i] <= 0.55 and g[i + 1] <= 0.55
+                 for i in range(len(sizes) - 2))
+    # arm tangle: red right of blue at the same time with opposite vertical cuts, so the arms cross and pull apart
+    tangle = sum(_tangle(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
+    # staircase hitbox abuse: two same-colour notes at one time on a diagonal, cut across the diagonal
+    staircase = sum(_staircase(a, b) for ns in by_t.values() for a in ns for b in ns if a is not b and a.color == b.color) // 2
     conv = sum(_converging(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     near = sum(_near_converging(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     return {
@@ -318,6 +350,10 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
         "inline": inline / pairs,
         "zigzag3": 100.0 * mono3 / pairs,
         "ebpm": ebpm,
+        "tangle": tangle / max(len(ut), 1),
+        "gallop": 100.0 * gallop / max(len(ut), 1),
+        "inline4": 100.0 * inline4 / pairs,
+        "staircase": staircase / max(len(ut), 1),
     }
 
 

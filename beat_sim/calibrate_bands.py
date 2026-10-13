@@ -40,7 +40,7 @@ def main() -> None:
         print(f"    {d!r}: {{  # {len(rs)} maps")
         for k in rs[0]:
             lo, hi = np.percentile([r[k] for r in rs], [10, 90])
-            if k in ("vision", "vision_run3", "converging", "near_converging", "far_cross", "gap_ge2", "dots"):  # "none" is never out of band
+            if k in ("vision", "vision_run3", "converging", "near_converging", "far_cross", "gap_ge2", "dots", "tangle", "gallop", "inline4", "staircase"):  # "none" is never out of band
                 lo = 0.0
             print(f"        {k!r}: ({lo:.3f}, {hi:.3f}),")
         for k, v in keep.items():
