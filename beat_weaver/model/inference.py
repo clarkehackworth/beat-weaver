@@ -59,7 +59,7 @@ def _note_tokens_on_cell(base: int, x: int, y: int) -> slice:
 
 
 FOLLOW_THROUGH = 0.75  # grid cells the hand continues past a note along its cut
-CURVATURE = 0.3  # arc penalty added for a negative-curvature rotation above 45 degrees (a repeat, 1.0, stays worst)
+CURVATURE = 0.0  # arc penalty added for a negative-curvature rotation above 45 degrees; 0.3 cost ~1.5 points and blew up `updown` (see MAPPING_GUIDELINES 17)
 VISION_CELLS = ((1, 1), (2, 1))  # middle row, centre columns: a note here hides the ones behind it
 
 

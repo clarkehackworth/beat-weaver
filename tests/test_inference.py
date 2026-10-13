@@ -119,7 +119,10 @@ class TestGrammarMask:
         assert _arc_penalty(LEFT_BASE, None, 1).sum() == 0         # no previous cut
 
     def test_arc_penalty_charges_negative_curvature(self):
-        from beat_weaver.model.inference import CURVATURE, _arc_penalty
+        from beat_weaver.model import inference
+        from beat_weaver.model.inference import _arc_penalty
+        CURVATURE = 0.3
+        inference.CURVATURE = CURVATURE  # default is 0 (off); exercise the term at the value that was tried
         from beat_weaver.model.tokenizer import _encode_note_token
         tok = lambda x, y, d: _encode_note_token(LEFT_BASE, x, y, d)
         pen = _arc_penalty(LEFT_BASE, (1, 1), 1)  # cut DOWN at (1,1); hand sits below it
@@ -131,6 +134,7 @@ class TestGrammarMask:
         assert pen[tok(3, 2, 6)] <= 1.0
         base = _arc_penalty(LEFT_BASE, (1, 1), 1)[tok(1, 1, 0)]  # straight reversal on the same cell: free
         assert base < 0.01
+        inference.CURVATURE = 0.0
 
     def test_bars_are_sequential_and_bounded(self):
         """Exactly one bar token is ever allowed: current_bar + 1, and none past the window."""

@@ -31,7 +31,7 @@ collected in the [backlog](#backlog) at the end.
 | Time scaling: resets are fine when the hand has had time (about 1.5 beats) to come back. | Intermediate: Spacing | `--flow-window` fades the flow penalty to 0 over the last beat of the window (default 1.5). |
 | Rotation amounts: 180° and 135° are safe at any speed; 90° maybe; 45° is a reset. Larger changes need more time. | Basic: Parity | Arc penalty is cosine-shaped so 180° is cheapest and 45° worst. |
 | Momentum: a wrist turning one way wants to keep turning, up to a point; then it must unwind. | Intermediate: Momentum and Tension | `--momentum-bias` rewards cuts that keep the rotation sense, flipping to a penalty after 3 same-sense turns. |
-| Swing curvature: positive (natural arc) fine to 135°; negative beyond 45° is harsh. | Intermediate: Rotations | Arc penalty adds `inference.CURVATURE` (0.3) when the new cut turns back against the sense of last-cut → travel and the two cuts are more than 45° apart; a 180° reversal is free. |
+| Swing curvature: positive (natural arc) fine to 135°; negative beyond 45° is harsh. | Intermediate: Rotations | `inference.CURVATURE` adds to the arc penalty when the new cut turns back against the sense of last-cut → travel and the cuts are more than 45° apart. Implemented but **off (0.0)**: at 0.3 it cost ~1.5 composite points over 48 maps and pushed `updown` out of band in 22 of 48 Expert/Expert+ maps. |
 | Avoid awkward same-colour curves, triangles (three cuts rotating one way), Shrado angles, staircase hitbox abuse, Loloppe notes. | Basic, Glossary | Momentum tension cap covers triangles. Evaluator `staircase` (same-colour same-time diagonal pair cut across the diagonal, per hit). Shrado angles and Loloppe notes: backlog 10. |
 
 ## 3. Spatial patterns
@@ -118,4 +118,4 @@ Numbering continues from the review that produced this document. Items 1–7, 9,
 14. ~~Lighting~~ shipped: `lighting.light_events`, on by default, `--no-lights` to skip.
 15. ~~Windows and towers~~ shipped: `shaping.emphasize` with `difficulty="ExpertPlus"`, gated by `TIERS[..]["towers"]`.
 16. ~~Unique-pattern limit for Easy/Normal~~ shipped: `TIERS[..]["max_cells"]` (Easy 3, Normal 5 distinct hand/cell placements per 2 bars).
-17. ~~Swing curvature term~~ shipped: `inference.CURVATURE` in `_arc_penalty`.
+17. ~~Swing curvature term~~ tried and switched off: `inference.CURVATURE` in `_arc_penalty`. A/B on 4 songs x 3 difficulties x 2 seeds (2026-10-13): old 88.5, with 0.3 86.2, with 0 87.7. A smaller value is untested.
