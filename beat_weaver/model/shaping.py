@@ -103,6 +103,8 @@ def downmap(notes: list[Note], bpm: float, src: str, dst: str, strength: np.ndar
 
 def _converging(l: Note, r: Note) -> bool:
     """Same-time pair whose cuts drive the sabers into each other (mirrors beat_sim.rhythm._converging)."""
+    if _cuts_through(l, r) or _cuts_through(r, l):
+        return True
     if l.cut_direction == 8 or r.cut_direction == 8:
         return False
     dx, dy = r.x - l.x, r.y - l.y
@@ -112,6 +114,14 @@ def _converging(l: Note, r: Note) -> bool:
         return True
     lv, rv = CUT_VEC[l.cut_direction], CUT_VEC[r.cut_direction]
     return lv[0] * dx + lv[1] * dy > 0 and rv[0] * -dx + rv[1] * -dy > 0
+
+
+def _cuts_through(a: Note, b: Note) -> bool:
+    """a's blade path (1-2 cells along its cut) runs over b's cell: the saber hits the wrong colour first."""
+    if a.cut_direction not in range(8):
+        return False
+    v = CUT_VEC[a.cut_direction]
+    return any((a.x + k * v[0], a.y + k * v[1]) == (b.x, b.y) for k in (1, 2))
 
 
 def repair_parity(notes: list[Note], bpm: float, window_beats: float = 2.0) -> list[Note]:
@@ -276,16 +286,37 @@ def gate_patterns(notes: list[Note], bpm: float, difficulty: str) -> list[Note]:
     if t["max_cells"]:
         out = _limit_cells(out, bpm, t["max_cells"])
     out = repair_parity(_sorted(out), bpm)
-    # a reversed diagonal can now point at the other hand's note; make such pairs straight cuts
-    hits = _hits(out)
+    return _sorted(n for h in _resolve_collisions(_hits(out)) for n in h)
+
+
+def _resolve_collisions(hits: list[list[Note]]) -> list[list[Note]]:
+    """No same-time pair may converge or cut through the other colour (emphasis, repeats and parity repair
+    can all create one). Try, in order: straighten diagonals, reverse one offender's cut, drop the extra
+    notes of a same-colour group, drop the offender."""
+    def bad(h):
+        return [(l, r) for l in h if l.color == 0 for r in h if r.color == 1 if _converging(l, r)]
     for h in hits:
-        L = [n for n in h if n.color == 0]
-        R = [n for n in h if n.color == 1]
-        if L and R and any(_converging(l, r) for l in L for r in R):
-            for k, n in enumerate(h):
-                if n.cut_direction >= 4 and n.cut_direction != 8:
-                    h[k] = replace(n, cut_direction=0 if CUT_VEC[n.cut_direction][1] > 0 else 1)
-    return _sorted(n for h in hits for n in h)
+        if not bad(h):
+            continue
+        for k, n in enumerate(h):  # 1. diagonals to straight
+            if 4 <= n.cut_direction <= 7:
+                h[k] = replace(n, cut_direction=0 if CUT_VEC[n.cut_direction][1] > 0 else 1)
+        for l, r in bad(h):  # 2. reverse the cut that runs through the other note
+            for n in (l, r):
+                other = r if n is l else l
+                if _cuts_through(n, other) and n in h:
+                    cand = replace(n, cut_direction=_REVERSE[n.cut_direction])
+                    if not _converging(cand, other) and not _converging(other, cand):
+                        h[h.index(n)] = cand
+        if bad(h):  # 3. a same-colour group (stack/tower) keeps only its first note
+            for color in (0, 1):
+                grp = [n for n in h if n.color == color]
+                for n in grp[1:]:
+                    h.remove(n)
+        while bad(h):  # 4. drop the offender (the note whose blade runs through the other)
+            l, r = bad(h)[0]
+            h.remove(l if _cuts_through(l, r) else r)
+    return hits
 
 
 # --- 2. section repeats -------------------------------------------------------------------------------------

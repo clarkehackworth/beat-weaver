@@ -417,14 +417,16 @@ class TestGenerateFullSong:
         tok = lambda x, y, d: _encode_note_token(RIGHT_BASE, x, y, d)
         m = _converging_right_tokens((1, 1), 3)  # left note at (1,1) cutting RIGHT
         assert m[tok(2, 1, 2)], "right note just to its right cutting LEFT: blades meet"
-        assert not m[tok(2, 1, 3)], "both cutting right: fine"
-        assert not m[tok(2, 1, 0)] and not m[tok(2, 1, 1)], "perpendicular: fine"
-        assert not m[tok(3, 1, 2)], "two cells away: not adjacent, allowed"
+        assert m[tok(2, 1, 3)], "both cutting right: the left blade sweeps over the blue first (cut-through)"
+        assert not m[tok(2, 2, 0)] and not m[tok(2, 0, 1)], "perpendicular, cutting away, off the blade path: fine"
+        assert m[tok(3, 1, 2)], "two cells away cutting back: the blue blade runs over the red (cut-through)"
+        assert not m[tok(3, 0, 3)], "two cells away on another row: fine"
         assert m[tok(1, 1, 0)] and m[tok(1, 1, 3)] and not m[tok(1, 1, 8)], "same cell: any directional cut blocked, dot ok"
-        assert not m[tok(0, 1, 3)], "behind the left cut: fine"
+        assert not m[tok(0, 1, 2)], "behind the left cut, sweeping away: fine"
         m2 = _converging_right_tokens((1, 1), 0)  # left cutting UP
         assert m2[tok(1, 2, 1)] and m2[tok(2, 2, 6)] and not m2[tok(2, 2, 0)]
-        assert _converging_right_tokens((1, 1), 8).sum() == 0
+        m8 = _converging_right_tokens((1, 1), 8)  # left is a dot: only cuts that run over it are blocked
+        assert m8[tok(2, 1, 2)] and not m8[tok(2, 1, 3)] and not m8[tok(0, 0, 1)]
 
     def test_near_converging_is_blocked_by_default_and_allowed_by_flag(self):
         from beat_weaver.model.inference import _converging_right_tokens
@@ -435,8 +437,11 @@ class TestGenerateFullSong:
         assert _converging_right_tokens((1, 1), 0)[near]
         assert not _converging_right_tokens((1, 1), 0, block_near=False)[near]
         assert _converging_right_tokens((1, 1), 3, block_near=False)[tok(2, 1, 2)], "head-on stays blocked either way"
-        assert not _converging_right_tokens((1, 1), 3)[tok(2, 1, 1)], "90 deg apart is not a near miss"
-        assert not _converging_right_tokens((1, 1), 3)[tok(3, 1, 6)], "two cells away is fine"
+        # left at (1,1) cutting right: its blade runs over (2,1), so every directional RIGHT note there is a
+        # cut-through (favourites Expert/Expert+: 0.3% of doubles; a vertical one is 0.01%)
+        assert _converging_right_tokens((1, 1), 3)[tok(2, 1, 1)], "cut-through: left blade passes over the blue"
+        assert not _converging_right_tokens((1, 1), 3)[tok(2, 0, 1)], "90 deg apart off the blade path is not a near miss"
+        assert not _converging_right_tokens((1, 1), 3)[tok(3, 0, 6)], "two cells away off the blade path is fine"
         # neither aimed at the other: left at (1,1) cutting LEFT, right at (2,1) cutting UP-RIGHT, 135 apart but diverging
         assert not _converging_right_tokens((1, 1), 2)[tok(2, 1, 5)]
 
@@ -498,7 +503,7 @@ class TestGenerateFullSong:
                         tot += 1; d += RIGHT_BASE <= b < RIGHT_BASE + RIGHT_COUNT
             return d / max(tot, 1), tot
         r0, n0 = rate(0.0); r1, n1 = rate(20.0)
-        assert n0 > 20 and r1 >= r0 and r1 == 1.0, (r0, r1)
+        assert n0 > 20 and r1 >= r0 and r1 >= 0.95, (r0, r1)  # a few slots have every RIGHT cut masked by cut-through
 
     def test_beat_focus_leaves_weak_beats_with_one_note(self, small_model):
         from beat_weaver.model.inference import _onset_schedule

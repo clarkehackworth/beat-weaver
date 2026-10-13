@@ -91,6 +91,9 @@ REACTION_MS = (400, 1500)  # bsmg jump settings: Expert+ 500-600 ms up to Easy 1
 DOUBLE_DIRECTIONAL_RATE = {"Easy": 0.03, "Normal": 0.03, "Hard": 0.07, "Expert": 0.06, "ExpertPlus": 0.11}
 
 
+_CUT_XY = {0: (0, 1), 1: (0, -1), 2: (-1, 0), 3: (1, 0), 4: (-1, 1), 5: (1, 1), 6: (-1, -1), 7: (1, -1)}
+
+
 def _swing_checks(notes: list[dict], difficulty: str, bpm: float, add) -> None:
     """Per-hand speed and parity: effective BPM over 2 s windows and double directionals within 1.5 beats."""
     if bpm <= 0:
@@ -187,7 +190,7 @@ def check_difficulty_notes(
     # ``_type`` is the color: 0=red (left hand), 1=blue (right hand).
     # ``_lineIndex`` is the column (0-3), ``_lineLayer`` the row (0-2).
     crossed = 0
-    wide = 0
+    wide = through = 0
     for beat_notes in by_beat.values():
         red_cols: list[int] = []
         blue_cols: list[int] = []
@@ -203,6 +206,16 @@ def check_difficulty_notes(
         # on the left half at the same beat forces the sabers to pass each other.
         if any(c >= 2 for c in red_cols) and any(c <= 1 for c in blue_cols):
             crossed += 1
+        # cut-through: a note's blade path (1-2 cells along its cut) runs over the other colour's note
+        for a in beat_notes:
+            d = a.get("_cutDirection")
+            if d not in _CUT_XY or not _is_num(a.get("_lineIndex")) or not _is_num(a.get("_lineLayer")):
+                continue
+            dx, dy = _CUT_XY[d]
+            cells = {(a["_lineIndex"] + k * dx, a["_lineLayer"] + k * dy) for k in (1, 2)}
+            if any(b.get("_type") not in (a.get("_type"), None) and (b.get("_lineIndex"), b.get("_lineLayer")) in cells
+                   for b in beat_notes if b.get("_type") in (0, 1)):
+                through += 1
         # wide doubles: >=2 notes of one color at this beat that one straight swipe
         # cannot cleanly cover (not same-row/adjacent and not same-col/adjacent).
         for color in (0, 1):
@@ -224,6 +237,8 @@ def check_difficulty_notes(
         add(difficulty, "playability", "crossed hands (red on right + blue on left at same beat)", crossed)
     if wide:
         add(difficulty, "playability", "wide doubles (same-color notes one swipe cannot cover)", wide)
+    if through:
+        add(difficulty, "playability", "cut-through (a cut's path runs over the other colour's note)", through)
     _swing_checks(notes, difficulty, bpm, add)
 
     return beats

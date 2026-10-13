@@ -189,6 +189,8 @@ def _near_converging(l: Note, r: Note) -> bool:
 
 
 def _converging(l: Note, r: Note) -> bool:
+    if _cuts_through(l, r) or _cuts_through(r, l):
+        return True
     if l.cut_direction not in _CUT or r.cut_direction not in _CUT:
         return False
     dx, dy = r.x - l.x, r.y - l.y
@@ -198,6 +200,14 @@ def _converging(l: Note, r: Note) -> bool:
         return True
     lv, rv = _CUT[l.cut_direction], _CUT[r.cut_direction]
     return lv[0] * dx + lv[1] * dy > 0 and rv[0] * -dx + rv[1] * -dy > 0
+
+
+def _cuts_through(a: Note, b: Note) -> bool:
+    """a's blade path (1-2 cells along its cut) runs over b's cell: the saber hits the wrong colour first."""
+    if a.cut_direction not in range(8):
+        return False
+    v = _CUT[a.cut_direction]
+    return any((a.x + k * v[0], a.y + k * v[1]) == (b.x, b.y) for k in (1, 2))
 AUDIO_METRICS = ("energy_corr", "onset_hit")
 
 

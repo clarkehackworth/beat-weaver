@@ -74,9 +74,21 @@ def _converging_right_tokens(left_cell: tuple[int, int], left_dir: int, block_ne
     reference maps use it in ~4 of 1000 doubles.
     """
     m = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
+    # cut-through: a RIGHT cut whose blade path (1-2 cells along the cut) runs over the LEFT note's cell
+    for x in range(COLS):
+        for y in range(ROWS):
+            sl = _note_tokens_on_cell(RIGHT_BASE, x, y)
+            for d in range(8):
+                rv = _CUT_VEC[d]
+                if any((x + k * int(rv[0]), y + k * int(rv[1])) == left_cell for k in (1, 2)):
+                    m[sl.start + d] = True
     if left_dir < 0 or left_dir == 8:
         return m
     lv = _CUT_VEC[left_dir]
+    for k in (1, 2):  # ... and the LEFT blade's path runs over the RIGHT note's cell, whatever its cut
+        cx, cy = left_cell[0] + k * int(lv[0]), left_cell[1] + k * int(lv[1])
+        if 0 <= cx < COLS and 0 <= cy < ROWS:
+            m[_note_tokens_on_cell(RIGHT_BASE, cx, cy)] = True
     for x in range(COLS):
         for y in range(ROWS):
             dx, dy = x - left_cell[0], y - left_cell[1]

@@ -196,3 +196,16 @@ def test_gate_patterns_limits_distinct_cells_on_easy():
     assert len(out) == 16
     hard = shaping.gate_patterns(notes, BPM, "Hard")
     assert len({(n.color, n.x, n.y) for n in hard}) == 4
+
+
+def test_gate_patterns_removes_cut_through_pairs():
+    # blue stack at the bottom of column 3 cutting up into a red on the top row (seen in Remedy Expert)
+    notes = [N(0.0, 3, 0, 1, 0), N(0.0, 3, 1, 1, 0), N(0.0, 3, 2, 0, 0),
+             N(2.0, 0, 2, 1, 1), N(2.0, 0, 0, 0, 1)]  # blue top of column 0 cutting down into red two below
+    out = shaping.gate_patterns(notes, BPM, "ExpertPlus")
+    for h in shaping._hits(out):
+        for l in h:
+            for r in h:
+                if l.color == 0 and r.color == 1:
+                    assert not shaping._converging(l, r), (l, r)
+    assert len(out) >= 4  # resolved by reversing / trimming the stack, not by deleting everything

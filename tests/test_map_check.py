@@ -231,3 +231,12 @@ def test_swing_checks_flag_speed_reaction_and_double_directionals(tmp_path):
     assert any("effective BPM" in m for m in msgs)
     assert any("double directionals" in m for m in msgs)
     assert any("reaction time" in m for m in msgs)
+
+
+def test_cut_through_flagged():
+    from beat_weaver.model.map_check import check_difficulty_notes, MapReport
+    rep = MapReport(folder="x")
+    notes = [{"_time": 1.0, "_lineIndex": 3, "_lineLayer": 1, "_type": 1, "_cutDirection": 0},
+             {"_time": 1.0, "_lineIndex": 3, "_lineLayer": 2, "_type": 0, "_cutDirection": 0}]
+    check_difficulty_notes(notes, difficulty="Expert", add=rep.add, bpm=120.0)
+    assert any("cut-through" in i.message for i in rep.issues)
