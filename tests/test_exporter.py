@@ -151,3 +151,33 @@ class TestExportNotes:
 
         dat = json.loads((result / "Expert.dat").read_text())
         assert dat["_notes"] == []
+
+
+def test_jump_settings_pin_reaction_time():
+    from beat_weaver.model.exporter import _REACTION_MS, jump_settings
+
+    for diff, target in _REACTION_MS.items():
+        for bpm in (90.0, 128.0, 180.0):
+            njs, offset = jump_settings(diff, bpm)
+            beat = 60.0 / bpm
+            hjd = 4.0
+            while njs * beat * hjd > 17.999:
+                hjd /= 2
+            rt = max(hjd + offset, 0.25) * beat * 1000
+            assert abs(rt - target) < 15, (diff, bpm, rt)
+    assert jump_settings("Easy", 128.0)[0] < jump_settings("ExpertPlus", 128.0)[0]
+
+
+def test_export_notes_writes_several_difficulties(tmp_path):
+    import json
+
+    from beat_weaver.model.exporter import export_notes
+    from beat_weaver.schemas.normalized import Note
+
+    audio = tmp_path / "song.ogg"
+    audio.write_bytes(b"OggS")
+    n = Note(beat=1.0, time_seconds=0.5, x=0, y=0, color=0, cut_direction=1)
+    out = export_notes({"Hard": [n], "Easy": [n]}, 120.0, "s", audio, tmp_path / "map", "Hard")
+    info = json.loads((out / "Info.dat").read_text())
+    diffs = [b["_difficulty"] for b in info["_difficultyBeatmapSets"][0]["_difficultyBeatmaps"]]
+    assert diffs == ["Easy", "Hard"] and (out / "Easy.dat").exists() and (out / "Hard.dat").exists()

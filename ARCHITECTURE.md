@@ -188,6 +188,18 @@ model preference:
 | Saber arc | soft | `--flow-penalty`: the cheap next cut continues the hand's follow-through from its last note. |
 | Doubles | soft | `--doubles-bias` raises both-hands-at-once notes toward the reference rate. |
 
+## Stage 2b: shaping (rules)
+
+`beat_weaver/model/shaping.py`, after the decoder, before export. Four passes from the bsmg mapping
+guidelines, all plain numpy: repeated song sections get the first occurrence's notes (mirrored on odd
+repeats), the loudest isolated hits become stacks, lower difficulties are thinned from the generated
+one (to each difficulty's target density, weakest beats first, hits removed whole so parity holds),
+and a pattern ladder (`TIERS`) reshapes every exported difficulty to what it may contain: Easy is
+up/down singles on its own side of the grid a beat apart, Normal adds horizontals, Hard adds
+diagonals, crossovers, the top row and stacks, Expert adds sliders. Flags `--repeats`, `--emphasis`,
+`--sliders`, `--downmap`. See
+[docs/MAPPING_GUIDELINES.md](docs/MAPPING_GUIDELINES.md).
+
 ## Stage 3: trimming (rules)
 
 `generate_full_song` in `beat_weaver/model/inference.py`
@@ -209,8 +221,8 @@ fixed. Nothing is trained.
 
 Generation is stochastic, so the system makes several candidates and scores them.
 
-- **Rhythm and layout (`rhythm.py`):** 17 statistics per map, including density, stream runs,
-  doubles, dots, row and column use, vision blocks and collisions. Each is checked against the
+- **Rhythm and layout (`rhythm.py`):** 20 statistics per map, including density, stream runs,
+  doubles, dots, row and column use, lateral hand motion (piano streams vs inline), vision blocks and collisions. Each is checked against the
   10th–90th percentile band of reference maps at the same difficulty. The bands come from 535
   hand-picked favourites plus 303 official maps, about 2,500 difficulties.
 - **Music fit (`music.py`):** whether note density per bar follows the song's loudness, and the
@@ -297,6 +309,7 @@ with the fork's grammar fixes and masks applied.
 
 ## Where to read more
 
+- [docs/MAPPING_GUIDELINES.md](docs/MAPPING_GUIDELINES.md): bsmg.wiki mapping guidelines, which flag or metric enforces each, and the backlog.
 - [TRAINING.md](TRAINING.md): how to train the model, step by step, in the order that produced the production model.
 - [beat_sim/README.md](beat_sim/README.md): evaluator, loop and mapper details, calibration.
 - [CODEBASE_REFERENCE.md](CODEBASE_REFERENCE.md): module-by-module reference (upstream).

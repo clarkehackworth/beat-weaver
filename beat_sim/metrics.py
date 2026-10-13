@@ -16,6 +16,7 @@ TIP_SPEED_MAX = 57.0  # m/s, p99 of favourites (p50 16, p90 32)
 TIP_ACCEL_MAX = 3340.0  # m/s^2, p99 of favourites (p50 345, p90 2600)
 QD_RATIO_MAX = 4.9  # joint speed / body.QD_MAX, p99 of favourites
 STRESS_HIGH = 1.0  # limit_stress above this = a joint pinned at its range
+RESET_WINDOW_S = 0.75  # 1.5 beats at 120 bpm; same-way cuts further apart are legal resets
 CROSS_X = 0.6  # metres past the midline that counts as a crossover: the far column only (favourites do near-column 18% of the time)
 
 
@@ -66,7 +67,8 @@ def score_hand(traj: Trajectory) -> HandReport:
         if win.any() and (qd_ratio[win].max() > QD_RATIO_MAX or tip_speed[win].max() > TIP_SPEED_MAX or tip_accel[win].max() > TIP_ACCEL_MAX):
             too_fast += 1
         if i and r.swing.direction is not None and rs[i - 1].swing.direction is not None:
-            if float(r.swing.direction @ rs[i - 1].swing.direction) > 0.5:
+            # a same-way cut is a reset only when the hand had no time to come back (bsmg: ~1.5 beats)
+            if float(r.swing.direction @ rs[i - 1].swing.direction) > 0.5 and r.swing.t - rs[i - 1].swing.t < RESET_WINDOW_S:
                 resets += 1
         for q in (r.q_approach, r.q_contact, r.q_follow):
             stresses.append(limit_stress(q))

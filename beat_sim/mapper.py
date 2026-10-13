@@ -45,7 +45,10 @@ PRESET = {
 DOUBLES_FRACTION = {"Easy": 0.10, "Normal": 0.15, "Hard": 0.20, "Expert": 0.25, "ExpertPlus": 0.25}
 DENSITY_SCALE = {"Expert": 1.1, "ExpertPlus": 1.1}  # ponytail: generated nps lands ~18% over target and the scorer picked the low candidate; tune per play test
 DENSITY_BONUS = {"Expert": 10.0, "ExpertPlus": 10.0}  # max points added to the ranking score (not the report)
-DENSITY_VARIANTS = (0.85, 1.0, 1.15)  # ponytail: two hedges around the preset; widen if winners sit at an edge
+DENSITY_VARIANTS = (0.85, 1.0, 1.15)
+# bsmg-guideline shaping applied to every candidate (see beat_weaver/model/shaping.py and docs/MAPPING_GUIDELINES.md)
+SHAPING = {"drift_bias": 1.5, "momentum_bias": 0.5, "flow_window": 1.5, "repeats": 0.7, "emphasis": 0.08}
+DOWNMAP_FROM = {"Easy": "Hard", "Normal": "Hard", "Hard": "Hard"}  # ponytail: Hard is generated; Easy/Normal are thinned from it  # ponytail: two hedges around the preset; widen if winners sit at an edge
 
 
 def density_bonus(diff: str, nps: float) -> float:
@@ -63,9 +66,11 @@ def target_nps(diff: str) -> float:
     return (lo + hi) / 2 / (1 + DOUBLES_FRACTION[diff]) * DENSITY_SCALE.get(diff, 1.0)
 
 
-def flags_for(diff: str, nps: float, seed: int) -> str:
+def flags_for(diff: str, nps: float, seed: int, downmap: tuple[str, ...] = ()) -> str:
     p = PRESET[diff]
-    return (("--beat-focus " if p["beat_focus"] else "") + f"--beat-floor {p['beat_floor']} --max-run {p['max_run']} "
+    sh = " ".join(f"--{k.replace('_', '-')} {v}" for k, v in SHAPING.items())
+    dm = (" --downmap " + " ".join(downmap)) if downmap else ""
+    return (("--beat-focus " if p["beat_focus"] else "") + f"--beat-floor {p['beat_floor']} --max-run {p['max_run']} {sh}{dm} "
             f"--two-stage --notes-per-second {nps:.2f} --min-gap {p['min_gap']} --doubles-bias {p['doubles_bias']} "
             f"--flow-penalty {p['flow_penalty']} --dynamics {p['dynamics']} --vision-penalty {p['vision_penalty']} "
             f"--stream-bias {p['stream_bias']} --column-max-run {p['column_max_run']} "
@@ -104,7 +109,8 @@ def merge(winners: dict[str, Path], out: Path, meta: dict, cover: Path | None = 
         if diff not in winners:
             continue
         src = winners[diff]
-        entry = json.loads((src / "Info.dat").read_text())["_difficultyBeatmapSets"][0]["_difficultyBeatmaps"][0]
+        entries = json.loads((src / "Info.dat").read_text())["_difficultyBeatmapSets"][0]["_difficultyBeatmaps"]
+        entry = next((e for e in entries if e["_difficulty"] == diff), entries[0])  # candidate folders may hold downmaps too
         shutil.copy(src / entry["_beatmapFilename"], out / f"{diff}.dat")
         entry["_difficulty"], entry["_difficultyRank"], entry["_beatmapFilename"] = diff, RANK[diff], f"{diff}.dat"
         beatmaps.append(entry)
@@ -200,7 +206,9 @@ def main() -> None:
         if not args.no_sync:
             sync_code(repo)
         remote_song = upload_song(args.song, args.name)
-        for diff in args.difficulties:
+        gen_diffs = {DOWNMAP_FROM.get(d, d) for d in args.difficulties}
+        for diff in [d for d in DIFFS if d in gen_diffs]:
+            downmap = tuple(d for d in args.difficulties if DOWNMAP_FROM.get(d) == diff and d != diff)
             base = target_nps(diff)
             for i in range(args.candidates):
                 seed, variant = divmod(i, len(DENSITY_VARIANTS))
@@ -211,7 +219,7 @@ def main() -> None:
                 out_dir = shlex.quote(f"{REMOTE_ROOT}/{stem}_candidates/{name}")
                 cmd = (f"cd /data && {ENV} python -m beat_weaver.cli generate --checkpoint {args.checkpoint} "
                        f"--audio {REMOTE_ROOT}/{shlex.quote(remote_song)} --difficulty {diff} --output {out_dir} "
-                       f"{flags_for(diff, nps, seed)}")
+                       f"{flags_for(diff, nps, seed, downmap)}")
                 print(f"generate {name} ...", end="", flush=True)
                 log = remote(cmd)
                 print(" " + (log.strip().splitlines() or ["done"])[-1])
@@ -221,7 +229,8 @@ def main() -> None:
 
     from concurrent.futures import ProcessPoolExecutor
 
-    folders = [(diff, f) for diff in args.difficulties for f in sorted(work.glob(f"{diff}__*"))]
+    folders = [(diff, f) for diff in args.difficulties for f in sorted(work.glob(f"{DOWNMAP_FROM.get(diff, diff)}__*"))
+               if (f / f"{diff}.dat").exists()]
     cands: dict[str, list] = {}
     with ProcessPoolExecutor(max_workers=min(args.workers, max(len(folders), 1))) as ex:
         for (diff, folder), res in zip(folders, ex.map(score_candidate, [(str(f), d, args.reuse_reports) for d, f in folders])):

@@ -337,7 +337,7 @@ class TestGenerateFullSong:
         def repeat_rate(flow_penalty):
             rep = tot = 0
             for seed in range(30):
-                tokens = generate(model, mel, "Expert", config, temperature=1.5, seed=seed, flow_penalty=flow_penalty)
+                tokens = generate(model, mel, "Expert", config, temperature=1.5, seed=seed, flow_penalty=flow_penalty, flow_window=0)
                 for base, count in ((LEFT_BASE, LEFT_COUNT), (RIGHT_BASE, RIGHT_COUNT)):
                     dirs = [_decode_note_token(t, base)[2] for t in tokens if base <= t < base + count]
                     for d1, d2 in zip(dirs, dirs[1:]):
@@ -701,3 +701,51 @@ class TestGenerateFullSong:
         floored = _onset_schedule(model, memory, n, notes_per_beat=1.0, min_gap=4, dynamics=0.0, beat_floor=0.5)
         assert any(f >= 32 for f in every), "without a floor every beat gets its note"
         assert floored and all(f < 32 for f in floored), floored
+
+
+class TestShaping:
+    def test_drift_bonus_moves_one_lane_and_reverses_at_edge(self):
+        from beat_weaver.model.inference import _drift_bonus, _column_tokens
+        m = _drift_bonus(LEFT_BASE, (1, 1), +1)
+        assert (m[_column_tokens(LEFT_BASE, 2)] > 0).all() and (m[_column_tokens(LEFT_BASE, 0)] < 0).all()
+        assert abs(m[LEFT_BASE: LEFT_BASE + LEFT_COUNT].mean()) < 1e-6, "zero-mean over note tokens"
+        assert m[LEFT_EMPTY] == 0
+        edge = _drift_bonus(LEFT_BASE, (3, 1), +1)  # at the right edge the drift turns back
+        assert (edge[_column_tokens(LEFT_BASE, 2)] > 0).all() and (edge[_column_tokens(LEFT_BASE, 3)] < 0).all()
+        both = _drift_bonus(LEFT_BASE, (1, 1), 0)
+        assert (both[_column_tokens(LEFT_BASE, 0)] > 0).all() and (both[_column_tokens(LEFT_BASE, 2)] > 0).all()
+        assert not _drift_bonus(RIGHT_BASE, (1, 1), 1)[LEFT_BASE: LEFT_BASE + LEFT_COUNT].any()
+
+    def test_momentum_continues_then_unwinds(self):
+        from beat_weaver.model.inference import MOMENTUM_TENSION, _ROT, _momentum
+        from beat_weaver.model.tokenizer import _encode_note_token
+        # after an Up cut rotating towards Right (clockwise), Right keeps the sense, Left reverses it
+        sense_right, sense_left = _ROT[0, 3].item(), _ROT[0, 2].item()
+        assert sense_right == -sense_left != 0
+        rot = int(sense_right)
+        m = _momentum(LEFT_BASE, 0, rot)
+        assert m[_encode_note_token(LEFT_BASE, 1, 1, 3)] > 0 > m[_encode_note_token(LEFT_BASE, 1, 1, 2)]
+        wound = _momentum(LEFT_BASE, 0, rot * MOMENTUM_TENSION)
+        assert wound[_encode_note_token(LEFT_BASE, 1, 1, 3)] < 0
+        assert not _momentum(LEFT_BASE, 8, rot).any() and not _momentum(LEFT_BASE, 0, 0).any()
+
+    def test_generate_accepts_shaping_flags(self):
+        config = ModelConfig(
+            vocab_size=355,
+            max_seq_len=64,
+            n_mels=80,
+            encoder_layers=1,
+            encoder_dim=32,
+            encoder_heads=4,
+            encoder_ff_dim=64,
+            decoder_layers=1,
+            decoder_dim=32,
+            decoder_heads=4,
+            decoder_ff_dim=64,
+            dropout=0.0,
+        )
+        torch.manual_seed(0)
+        model = BeatWeaverModel(config).eval()
+        mel = torch.randn(80, 64)
+        toks = generate(model, mel, "Expert", config, seed=1, drift_bias=2.0, momentum_bias=1.0, flow_window=1.0)
+        assert toks[0] == START and (toks[-1] == END or len(toks) == config.max_seq_len)

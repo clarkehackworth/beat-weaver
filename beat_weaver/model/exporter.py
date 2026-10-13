@@ -9,16 +9,29 @@ from pathlib import Path
 from beat_weaver.model.tokenizer import decode_tokens
 from beat_weaver.schemas.normalized import Note
 
-# NJS lookup by difficulty
-_NJS_TABLE = {
-    "Easy": 10,
-    "Normal": 10,
-    "Hard": 12,
-    "Expert": 16,
-    "ExpertPlus": 18,
-}
+# Jump settings per difficulty: NJS and the reaction time the player gets, from the favourites' medians
+# (bsmg.wiki intermediate-mapping "Jump Settings": Expert+ 500-600 ms, Easy/Normal 750-1200 ms, NJS 16 baseline).
+_NJS_TABLE = {"Easy": 10, "Normal": 11, "Hard": 12, "Expert": 15, "ExpertPlus": 18}
+_REACTION_MS = {"Easy": 1200, "Normal": 1050, "Hard": 900, "Expert": 750, "ExpertPlus": 600}
 
-# Difficulty rank for Info.dat
+
+def jump_settings(difficulty: str, bpm: float) -> tuple[float, float]:
+    """(NJS, start beat offset) giving this difficulty its target reaction time at this BPM.
+
+    The game's half jump duration starts at 4 beats and halves while the jump distance exceeds 18 m,
+    then adds the offset (floor 0.25 beats). Reaction time = HJD in seconds, so without an offset it
+    swings with BPM; the offset pins it.
+    """
+    njs = _NJS_TABLE.get(difficulty, 16)
+    beat = 60.0 / bpm
+    hjd = 4.0
+    while njs * beat * hjd > 17.999:
+        hjd /= 2
+    target = _REACTION_MS.get(difficulty, 700) / 1000.0 / beat
+    offset = round(max(target, 0.25) - hjd, 2)
+    return njs, offset
+
+
 _DIFFICULTY_RANK = {
     "Easy": 1,
     "Normal": 3,
@@ -47,12 +60,21 @@ def _export_audio(audio_path: Path, output_dir: Path) -> str:
 def _build_info_dat(
     song_name: str,
     bpm: float,
-    difficulty: str,
+    difficulty: str | list[str],
     audio_filename: str = "song.ogg",
 ) -> dict:
-    """Build a v2 Info.dat structure."""
-    njs = _NJS_TABLE.get(difficulty, 16)
-    rank = _DIFFICULTY_RANK.get(difficulty, 7)
+    """Build a v2 Info.dat structure listing one difficulty, or several (ordered by rank)."""
+    diffs = [difficulty] if isinstance(difficulty, str) else sorted(difficulty, key=lambda d: _DIFFICULTY_RANK.get(d, 7))
+    beatmaps = []
+    for d in diffs:
+        njs, offset = jump_settings(d, bpm)
+        beatmaps.append({
+            "_difficulty": d,
+            "_difficultyRank": _DIFFICULTY_RANK.get(d, 7),
+            "_beatmapFilename": f"{d}.dat",
+            "_noteJumpMovementSpeed": njs,
+            "_noteJumpStartBeatOffset": offset,
+        })
 
     return {
         "_version": "2.0.0",
@@ -72,15 +94,7 @@ def _build_info_dat(
         "_difficultyBeatmapSets": [
             {
                 "_beatmapCharacteristicName": "Standard",
-                "_difficultyBeatmaps": [
-                    {
-                        "_difficulty": difficulty,
-                        "_difficultyRank": rank,
-                        "_beatmapFilename": f"{difficulty}.dat",
-                        "_noteJumpMovementSpeed": njs,
-                        "_noteJumpStartBeatOffset": 0,
-                    }
-                ],
+                "_difficultyBeatmaps": beatmaps,
             }
         ],
     }
@@ -148,7 +162,7 @@ def export_map(
 
 
 def export_notes(
-    notes: list[Note],
+    notes: list[Note] | dict[str, list[Note]],
     bpm: float,
     song_name: str,
     audio_path: Path,
@@ -161,7 +175,7 @@ def export_notes(
     (e.g. from windowed generation where notes have already been merged).
 
     Args:
-        notes: List of Note objects.
+        notes: List of Note objects, or {difficulty: notes} for a folder with several difficulties.
         bpm: Song BPM.
         song_name: Display name for the song.
         audio_path: Path to the audio file.
@@ -173,13 +187,10 @@ def export_notes(
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-
+    by_diff = notes if isinstance(notes, dict) else {difficulty: notes}
     audio_filename = _export_audio(Path(audio_path), output_dir)
-
-    info = _build_info_dat(song_name, bpm, difficulty, audio_filename)
+    info = _build_info_dat(song_name, bpm, list(by_diff), audio_filename)
     (output_dir / "Info.dat").write_text(json.dumps(info, indent=2), encoding="utf-8")
-
-    diff_dat = _build_difficulty_dat(notes)
-    (output_dir / f"{difficulty}.dat").write_text(json.dumps(diff_dat, indent=2), encoding="utf-8")
-
+    for d, ns in by_diff.items():
+        (output_dir / f"{d}.dat").write_text(json.dumps(_build_difficulty_dat(ns), indent=2), encoding="utf-8")
     return output_dir

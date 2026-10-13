@@ -37,6 +37,8 @@ ev["body"].right.too_fast                     # kinematic detail
 
 ## One song in, one map out
 
+Hard, Expert and Expert+ are generated; Easy and Normal are downmapped from the Hard winner's candidates (`DOWNMAP_FROM`), so the lower difficulties share Hard's motifs. Every candidate gets the bsmg shaping flags in `SHAPING` (drift, momentum, repeats, emphasis). See [../docs/MAPPING_GUIDELINES.md](../docs/MAPPING_GUIDELINES.md).
+
 ```
 python -m beat_sim.mapper song.mp3                       # Easy..ExpertPlus, 4 candidates each
 python -m beat_sim.mapper song.mp3 --difficulties Expert ExpertPlus --candidates 6

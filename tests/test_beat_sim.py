@@ -27,8 +27,10 @@ def test_clean_stream_scores_high():
 
 def test_same_direction_stream_is_reset_heavy():
     clean = simulate(stream(140, 40, [1, 0]))
-    broken = simulate(stream(140, 40, [1]))  # every cut points down
+    broken = simulate(stream(240, 40, [1]))  # every cut points down, half a second apart: inside the reset window
     assert broken.left.resets == broken.left.notes - 1
+    slow = simulate(stream(60, 40, [1]))  # two seconds apart: the hand has time to come back, legal resets
+    assert slow.left.resets == 0
     assert broken.score < clean.score
 
 
@@ -89,9 +91,12 @@ def test_ladder_forces_rising_density_and_prefers_total_score():
 def test_mapper_expertplus_candidates_can_use_beat_focus():
     from beat_sim.mapper import flags_for
 
-    assert "--beat-focus" in flags_for("ExpertPlus", 4.2, 0, True)
-    assert "--beat-focus" not in flags_for("ExpertPlus", 4.2, 1, False)
+    from beat_sim.mapper import PRESET
+    assert ("--beat-focus" in flags_for("ExpertPlus", 4.2, 0)) == PRESET["ExpertPlus"]["beat_focus"]
     assert "--seed 1" in flags_for("Expert", 3.3, 1)
+    assert "--downmap Easy Normal" in flags_for("Hard", 2.0, 0, ("Easy", "Normal"))
+    assert "--downmap" not in flags_for("Hard", 2.0, 0)
+    assert "--drift-bias" in flags_for("Expert", 3.3, 1)
 
 
 def test_merge_writes_song_metadata_and_cover(tmp_path):

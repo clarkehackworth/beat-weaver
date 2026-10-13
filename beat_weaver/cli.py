@@ -225,13 +225,32 @@ def cmd_generate(args: argparse.Namespace) -> None:
         end_seconds=last_music_second(audio, sr),
         notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, column_max_run=args.column_max_run, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging,
         reset_seconds=args.reset_gap, max_doubles=args.max_doubles, beat_floor=args.beat_floor, max_run=args.max_run,
+        drift_bias=args.drift_bias, momentum_bias=args.momentum_bias, flow_window=args.flow_window,
     )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
+    # Rule-based shaping after decoding (bsmg guidelines): repeated sections, emphasis, then downmapping.
+    from beat_weaver.model import shaping
+    strength, hop_s = shaping.onset_strength(audio, sr)
+    if args.repeats > 0:
+        pairs = shaping.find_repeats(mel.T, 60.0 / bpm / 16, bpm, bars=args.repeat_bars, min_sim=args.repeats)
+        notes = shaping.repeat_sections(notes, bpm, pairs, bars=args.repeat_bars)
+        print(f"Repeated sections: {len(pairs)} block(s) of {args.repeat_bars} bars copied")
+    if args.emphasis > 0 and args.difficulty not in ("Easy", "Normal"):
+        before = len(notes)
+        notes = shaping.emphasize(notes, bpm, strength, hop_s, top_frac=args.emphasis, sustain_frac=args.sliders)
+        print(f"Emphasis: {len(notes) - before} note(s) added as stacks/sliders")
+    by_diff = {args.difficulty: notes}
+    if args.downmap:
+        by_diff = shaping.downmap_ladder(notes, bpm, args.difficulty, [*args.downmap, args.difficulty],
+                                         strength=strength, hop_s=hop_s)
+    by_diff = {d: shaping.gate_patterns(ns, bpm, d) for d, ns in by_diff.items()}
+
     song_name = Path(args.audio).stem
     output = Path(args.output) if args.output else Path(f"output/{song_name}")
-    export_notes(notes, bpm, song_name, Path(args.audio), output, args.difficulty)
-    print(f"Generated map: {output} ({n_windows} window(s), {len(notes)} notes)")
+    export_notes(by_diff, bpm, song_name, Path(args.audio), output, args.difficulty)
+    counts = ", ".join(f"{d} {len(n)}" for d, n in by_diff.items())
+    print(f"Generated map: {output} ({n_windows} window(s), notes: {counts})")
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
@@ -436,6 +455,24 @@ def main() -> None:
                      help="Allow same-time notes on adjacent cells whose cuts are 135 deg apart with one aimed at the other (blocked by default)")
     gen.add_argument("--flow-penalty", type=float, default=2.0,
                      help="Logit penalty for a cut that breaks the saber's arc from the hand's last note (0 = off)")
+    gen.add_argument("--drift-bias", type=float, default=0.0,
+                     help="Logit bonus for a hand moving one lane over in the direction it last moved, reversing at the "
+                          "edges (piano streams / jumps). Favourites move ~0.75 lanes per swing; 0 = off")
+    gen.add_argument("--momentum-bias", type=float, default=0.0,
+                     help="Logit bonus for cuts that continue the hand's rotation sense, flipping after 3 same-sense turns (0 = off)")
+    gen.add_argument("--flow-window", type=float, default=1.5,
+                     help="Beats after which a hand counts as reset; --flow-penalty fades to 0 over the last beat (0 = never fades)")
+    gen.add_argument("--downmap", nargs="*", default=[], choices=["Easy", "Normal", "Hard", "Expert"], metavar="DIFF",
+                     help="Also write these lower difficulties, derived from the generated one by thinning ~20%% per "
+                          "step on the weakest beats (bsmg downmapping); Easy/Normal also lose crossovers and the top row")
+    gen.add_argument("--repeats", type=float, default=0.0, metavar="SIM",
+                     help="Copy the first occurrence's notes onto repeated song sections whose beat-synchronous mel "
+                          "similarity is >= SIM (0.7 is a good start; odd repeats are mirrored; 0 = off)")
+    gen.add_argument("--repeat-bars", type=int, default=4, help="Section block length in bars for --repeats")
+    gen.add_argument("--emphasis", type=float, default=0.0, metavar="FRAC",
+                     help="Turn the loudest FRAC of isolated hits into stacks (0.08 is a good start; skipped on Easy/Normal; 0 = off)")
+    gen.add_argument("--sliders", type=float, default=0.0, metavar="FRAC",
+                     help="With --emphasis: FRAC of isolated hits on sustained sounds become 2-dot sliders (0 = off)")
     gen.add_argument("--dynamics", type=float, default=1.0,
                      help="Two-stage: how much each bar's note budget follows the music (0 = flat/staccato, 1 = full)")
     gen.add_argument("--lead-in", type=float, default=2.0,

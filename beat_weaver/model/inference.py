@@ -158,6 +158,52 @@ def _arc_penalty(base: int, prev_cell: tuple[int, int] | None, prev_direction: i
     return pen
 
 
+def _column_tokens(base: int, x: int) -> slice:
+    return slice(base + x * ROWS * DIRS, base + (x + 1) * ROWS * DIRS)
+
+
+def _drift_bonus(base: int, prev_cell: tuple[int, int] | None, drift: int) -> torch.Tensor:
+    """(VOCAB_SIZE,) 0/1 mask of this hand's tokens one lane over in its drift direction.
+
+    drift is the sign of the hand's last lateral move (0 = none: both neighbours). At the edge the
+    drift reverses, so a hand sweeping right across the grid comes back left: the piano-stream shape.
+    """
+    m = torch.zeros(VOCAB_SIZE)
+    if prev_cell is None:
+        return m
+    x = prev_cell[0]
+    for nx in ((x + 1, x - 1) if drift == 0 else (x + drift,) if 0 <= x + drift < COLS else (x - drift,)):
+        if 0 <= nx < COLS:
+            m[_column_tokens(base, nx)] = 1.0
+    # zero-mean over this hand's note tokens: shapes *where* a note goes without lifting notes over
+    # the hand's EMPTY token (which would raise the doubles rate)
+    notes = slice(base, base + COLS * ROWS * DIRS)
+    m[notes] -= m[notes].mean()
+    return m
+
+
+# Rotation sense between two cuts: sign of the 2-D cross product (counter-clockwise > 0). Dots are 0.
+_ROT = torch.sign(_CUT_UNIT[:, 0:1] * _CUT_UNIT[:, 1].unsqueeze(0) - _CUT_UNIT[:, 1:2] * _CUT_UNIT[:, 0].unsqueeze(0))
+MOMENTUM_TENSION = 3  # same-sense rotations in a row before the wrist is wound up and should unwind
+
+
+def _momentum(base: int, prev_direction: int, rot: int) -> torch.Tensor:
+    """(VOCAB_SIZE,) in [-1, 1]: +1 for cuts that keep this hand's rotation going, -1 for the reverse.
+
+    bsmg "Momentum and Tension": a wrist turning one way wants to keep turning, up to a point. Past
+    MOMENTUM_TENSION consecutive same-sense turns the sign flips so the hand unwinds. rot is the
+    signed count of consecutive same-sense turns so far.
+    """
+    m = torch.zeros(VOCAB_SIZE)
+    if prev_direction < 0 or prev_direction == 8 or rot == 0:
+        return m
+    sense = _ROT[prev_direction]  # (9,) rotation sense of each next cut relative to the last
+    want = 1.0 if abs(rot) < MOMENTUM_TENSION else -1.0
+    v = (sense * (1 if rot > 0 else -1) * want).repeat(COLS * ROWS)
+    m[base: base + COLS * ROWS * DIRS] = v - v.mean()  # zero-mean: see _drift_bonus
+    return m
+
+
 # Cut directions pointing away from the body for a hand that has crossed over:
 # left hand in columns 2-3 may not cut Right/UpRight/DownRight, right hand in
 # columns 0-1 may not cut Left/UpLeft/DownLeft. Pattern seen in generated maps:
@@ -451,6 +497,9 @@ def generate(
     max_doubles: float = 1.0,
     beat_floor: float = 0.0,
     max_run: int = 0,
+    drift_bias: float = 0.0,
+    momentum_bias: float = 0.0,
+    flow_window: float = 1.5,
 ) -> list[int]:
     """Generate a token sequence autoregressively.
 
@@ -554,6 +603,9 @@ def generate(
     hit_has_vision = False  # whether the open position has one so far
     col_run = {LEFT_BASE: 0, RIGHT_BASE: 0}  # consecutive notes per hand in its last column
     last_frame = {LEFT_BASE: -10**9, RIGHT_BASE: -10**9}  # frame of each hand's last note
+    drift = {LEFT_BASE: 0, RIGHT_BASE: 0}  # sign of the hand's last lateral move
+    rot = {LEFT_BASE: 0, RIGHT_BASE: 0}  # signed count of consecutive same-sense rotations
+    beat_frames = SUBDIVISIONS_PER_BAR // 4
     hits = doubles = 0
     resets = {(b, d): _reset_tokens(b, d).to(device) for b in (LEFT_BASE, RIGHT_BASE) for d in range(8)}
     vis = {LEFT_BASE: _vision_tokens(LEFT_BASE).to(device), RIGHT_BASE: _vision_tokens(RIGHT_BASE).to(device)}
@@ -605,12 +657,24 @@ def generate(
                 onset_guidance * guidance[f0: f0 + POS_COUNT]
             )
 
-        # Flow: favour the cut that continues the saber's arc from the hand's last note
-        if flow_penalty > 0:
-            if POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT:
-                next_logits -= flow_penalty * _arc_penalty(LEFT_BASE, last_cell[LEFT_BASE], last_dir[LEFT_BASE]).to(device)
-            elif tokens[-1] == LEFT_EMPTY or LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT:
-                next_logits -= flow_penalty * _arc_penalty(RIGHT_BASE, last_cell[RIGHT_BASE], last_dir[RIGHT_BASE]).to(device)
+        # Flow: favour the cut that continues the saber's arc from the hand's last note, fading out as
+        # the hand has had time to reset; then the lateral drift and rotation momentum shaping.
+        if POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT:
+            hand_base = LEFT_BASE
+        elif tokens[-1] == LEFT_EMPTY or LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT:
+            hand_base = RIGHT_BASE
+        else:
+            hand_base = None
+        if hand_base is not None and last_cell[hand_base] is not None:
+            frame = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
+            gap_beats = (frame - last_frame[hand_base]) / beat_frames
+            fresh = min(1.0, max(0.0, flow_window - gap_beats)) if flow_window > 0 else 1.0
+            if flow_penalty > 0 and fresh > 0:
+                next_logits -= flow_penalty * fresh * _arc_penalty(hand_base, last_cell[hand_base], last_dir[hand_base]).to(device)
+            if drift_bias > 0 and gap_beats <= 1.0:
+                next_logits += drift_bias * _drift_bonus(hand_base, last_cell[hand_base], drift[hand_base]).to(device)
+            if momentum_bias > 0 and fresh > 0:
+                next_logits += momentum_bias * fresh * _momentum(hand_base, last_dir[hand_base], rot[hand_base]).to(device)
 
         # Collision: a RIGHT note may not cut into the LEFT note placed at this same time
         if left_cell is not None and (tokens[-1] == LEFT_EMPTY or LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT):
@@ -665,6 +729,12 @@ def generate(
         elif LEFT_BASE <= next_token < LEFT_BASE + LEFT_COUNT:
             x, y, d = _decode_note_token(next_token, LEFT_BASE)
             col_run[LEFT_BASE] = col_run[LEFT_BASE] + 1 if last_cell[LEFT_BASE] and last_cell[LEFT_BASE][0] == x else 1
+            if last_cell[LEFT_BASE] is not None and current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar - last_frame[LEFT_BASE] <= beat_frames:
+                drift[LEFT_BASE] = (x > last_cell[LEFT_BASE][0]) - (x < last_cell[LEFT_BASE][0]) or drift[LEFT_BASE]
+                sense = int(_ROT[last_dir[LEFT_BASE], d].item()) if 0 <= last_dir[LEFT_BASE] < 8 and d < 8 else 0
+                rot[LEFT_BASE] = rot[LEFT_BASE] + sense if sense and (rot[LEFT_BASE] == 0 or (sense > 0) == (rot[LEFT_BASE] > 0)) else sense
+            else:
+                drift[LEFT_BASE], rot[LEFT_BASE] = 0, 0
             last_frame[LEFT_BASE] = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
             left_cell, left_dir_open = (x, y), d
             last_dir[LEFT_BASE], last_cell[LEFT_BASE] = d, (x, y)
@@ -672,6 +742,12 @@ def generate(
         elif RIGHT_BASE <= next_token < RIGHT_BASE + RIGHT_COUNT:
             x, y, d = _decode_note_token(next_token, RIGHT_BASE)
             col_run[RIGHT_BASE] = col_run[RIGHT_BASE] + 1 if last_cell[RIGHT_BASE] and last_cell[RIGHT_BASE][0] == x else 1
+            if last_cell[RIGHT_BASE] is not None and current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar - last_frame[RIGHT_BASE] <= beat_frames:
+                drift[RIGHT_BASE] = (x > last_cell[RIGHT_BASE][0]) - (x < last_cell[RIGHT_BASE][0]) or drift[RIGHT_BASE]
+                sense = int(_ROT[last_dir[RIGHT_BASE], d].item()) if 0 <= last_dir[RIGHT_BASE] < 8 and d < 8 else 0
+                rot[RIGHT_BASE] = rot[RIGHT_BASE] + sense if sense and (rot[RIGHT_BASE] == 0 or (sense > 0) == (rot[RIGHT_BASE] > 0)) else sense
+            else:
+                drift[RIGHT_BASE], rot[RIGHT_BASE] = 0, 0
             last_frame[RIGHT_BASE] = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
             doubles += LEFT_BASE <= tokens[-2] < LEFT_BASE + LEFT_COUNT
             last_dir[RIGHT_BASE], last_cell[RIGHT_BASE] = d, (x, y)
@@ -725,6 +801,9 @@ def generate_full_song(
     max_doubles: float = 1.0,
     beat_floor: float = 0.0,
     max_run: int = 0,
+    drift_bias: float = 0.0,
+    momentum_bias: float = 0.0,
+    flow_window: float = 1.5,
 ) -> list[Note]:
     """Generate a complete Beat Saber map by processing audio in overlapping windows.
 
@@ -772,6 +851,7 @@ def generate_full_song(
             two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap, dynamics=dynamics,
             flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
             reset_gap=reset_gap, max_doubles=max_doubles, beat_floor=beat_floor, max_run=max_run,
+            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window,
         )
         return [n for n in decode_tokens(tokens, bpm) if lead_in_beat <= n.beat < min(audio_end_beat, end_beat)]
 
@@ -809,6 +889,7 @@ def generate_full_song(
             onset_guidance=onset_guidance, two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap,
             dynamics=dynamics, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
             reset_gap=reset_gap, max_doubles=max_doubles, beat_floor=beat_floor, max_run=max_run,
+            drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window,
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)

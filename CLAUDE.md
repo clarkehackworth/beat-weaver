@@ -56,7 +56,8 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 - `beat_weaver.model.audio` — mel spectrogram extraction, beat-aligned framing, BPM auto-detection
 - `beat_weaver.model.transformer` — AudioEncoder (Conformer or Transformer) + TokenDecoder + BeatWeaverModel (RoPE or sinusoidal PE)
 - `beat_weaver.model.inference` — autoregressive generation with grammar mask + windowed full-song generation
-- `beat_weaver.model.exporter` — token sequence or note list → playable v2 map folder
+- `beat_weaver.model.exporter` — token sequence or note list → playable v2 map folder (one or several difficulties; jump settings pin reaction time per difficulty)
+- `beat_weaver.model.shaping` — post-decode rule passes from bsmg mapping guidelines: downmapping, repeated-section copy, emphasis (stacks/sliders), per-difficulty pattern ladder (`TIERS`/`gate_patterns`)
 - `beat_weaver.model.evaluate` — onset F1, NPS accuracy, parity, diversity metrics
 
 **Output format:** `data/processed/notes_NNNN.parquet` (one row group per song, split at 1 GB) with columns: song_hash, source, difficulty, characteristic, bpm, beat, time_seconds, x, y, color, cut_direction, angle_offset. Reader (`read_notes_parquet`) handles both multi-file and legacy single-file layouts.
@@ -112,6 +113,10 @@ Comparable to the small model baseline (60.6% on all difficulties) despite train
 **Key lesson:** Medium+ models need lower LR (3e-5 vs 1e-4) and longer warmup (1000 vs 500 steps). The Conformer's conv module helps capture local audio patterns (onsets, transients) that pure attention misses.
 
 **Checkpoint resume:** Must save ALL training state (model, optimizer, scheduler, GradScaler). Missing GradScaler was root cause of NaN on resume (fresh scaler at scale=65536 causes overflow). Now saves `scheduler.pt` + `scaler.pt`; fallbacks handle old checkpoints.
+
+## Mapping guidelines
+
+[docs/MAPPING_GUIDELINES.md](docs/MAPPING_GUIDELINES.md) maps every bsmg.wiki mapping guideline to the flag, metric or check that enforces it, and holds the backlog of guidelines not yet implemented.
 
 ## Open Questions
 

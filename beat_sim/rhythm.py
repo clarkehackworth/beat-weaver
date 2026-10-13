@@ -36,6 +36,9 @@ BANDS = {
         'outer_cols': (0.287, 0.465),
         'far_cross': (0.000, 0.010),
         'updown': (0.590, 0.819),
+        'lateral': (0.250, 1.166),
+        'inline': (0.000, 0.618),
+        'zigzag3': (0.000, 4.919),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -58,6 +61,9 @@ BANDS = {
         'outer_cols': (0.308, 0.497),
         'far_cross': (0.000, 0.031),
         'updown': (0.565, 0.833),
+        'lateral': (0.221, 1.114),
+        'inline': (0.000, 0.553),
+        'zigzag3': (0.000, 6.192),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -80,6 +86,9 @@ BANDS = {
         'outer_cols': (0.336, 0.530),
         'far_cross': (0.000, 0.036),
         'updown': (0.520, 0.843),
+        'lateral': (0.469, 1.117),
+        'inline': (0.000, 0.388),
+        'zigzag3': (0.000, 8.071),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -102,6 +111,9 @@ BANDS = {
         'outer_cols': (0.365, 0.538),
         'far_cross': (0.000, 0.050),
         'updown': (0.447, 0.797),
+        'lateral': (0.547, 1.201),
+        'inline': (0.000, 0.353),
+        'zigzag3': (0.665, 9.364),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
         'lead_in': (1.6, 7.4),
@@ -124,6 +136,9 @@ BANDS = {
         'outer_cols': (0.399, 0.547),
         'far_cross': (0.000, 0.088),
         'updown': (0.359, 0.752),
+        'lateral': (0.427, 1.275),
+        'inline': (0.000, 0.372),
+        'zigzag3': (0.790, 10.860),
         'energy_corr': (0.286, 1.0),
         'onset_hit': (0.621, 1.0),
         'lead_in': (1.6, 6.5),
@@ -138,10 +153,12 @@ WEIGHTS = {  # what matters most, per the alignment discussion
     "vision": 2, "vision_run3": 2,  # notes in the middle-row centre cells (hide what follows), and runs of 3+ hits there
     "converging": 2,  # same-time pairs whose cuts drive the sabers into each other (favourites median 0)
     "near_converging": 1,  # 45 deg off head-on with one cut aimed at the other note; legal but very hard
+    # sideways motion of each hand between its own swings (bsmg "piano stream" / "jump" shapes vs "inline")
+    "lateral": 2, "inline": 1, "zigzag3": 1,
 }
 # Graded instead of pass/fail: full credit in the middle half of the band, fading to 0 at either edge.
 # A 210-note stream passed Expert+'s (15, 205) band as "in band" and scored the same as a 60-note one.
-GRADED = ("longest_run", "gap_le_half")
+GRADED = ("longest_run", "gap_le_half", "lateral")
 
 
 def _credit(k: str, v: float, lo: float, hi: float) -> float:
@@ -234,6 +251,23 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
     by_t: dict[float, list[Note]] = {}
     for x in n:
         by_t.setdefault(round(x.time_seconds, 3), []).append(x)
+    # Lateral motion per hand between its own consecutive swings within a beat: how far it moves
+    # sideways, how often it stays put (inline), and monotonic 3+ lane runs (the piano-stream shape).
+    dxs, inline, mono3 = [], 0, 0
+    for hand in (0, 1):
+        h = sorted((x for x in n if x.color == hand), key=lambda x: x.time_seconds)
+        run, lastd = 1, 0
+        for a, b in zip(h, h[1:]):
+            if (b.time_seconds - a.time_seconds) / beat > 1.01:
+                run, lastd = 1, 0
+                continue
+            d = b.x - a.x
+            dxs.append(abs(d))
+            inline += d == 0 and b.y == a.y
+            run = run + 1 if d and (lastd == 0 or (d > 0) == (lastd > 0)) else (2 if d else 1)
+            lastd = d or lastd
+            mono3 += run == 3
+    pairs = max(len(dxs), 1)
     conv = sum(_converging(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     near = sum(_near_converging(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     return {
@@ -254,6 +288,9 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
         "outer_cols": sum(x.x in (0, 3) for x in n) / len(n),
         "far_cross": sum((x.color == 0 and x.x == 3) or (x.color == 1 and x.x == 0) for x in n) / len(n),
         "updown": sum(x.cut_direction in (0, 1) for x in n) / len(n),
+        "lateral": float(np.mean(dxs)) if dxs else 0.0,
+        "inline": inline / pairs,
+        "zigzag3": 100.0 * mono3 / pairs,
     }
 
 
