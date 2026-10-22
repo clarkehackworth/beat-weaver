@@ -115,7 +115,7 @@ What follows from that:
   tempo whose beat phase locks tightest to the audio's onset energy. Trackers are often off by a
   fraction of a BPM. A 0.7 BPM error walks the grid a full beat every 85 seconds, which made
   verses start empty and end crowded. The tempo only moves when the best lock is at least 5%
-  sharper than the detector's own value. On a song with a steady pulse the gain is large (lying:
+  sharper than the detector's own value. On a song with a steady pulse the gain is large (one test song:
   80.7 corrected to 80.0, a 12.7% gain). On songs without one it is under 0.5% and the score is
   noise, so the detector's tempo is kept.
 

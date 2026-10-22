@@ -100,9 +100,21 @@ def _build_info_dat(
     }
 
 
-def _build_difficulty_dat(notes: list, version: str = "2.0.0", events: list[dict] | None = None) -> dict:
-    """Build a v2 difficulty .dat structure from decoded notes (and optional lighting events)."""
-    v2_notes = []
+def extras_to_v2(extras: list) -> tuple[list[dict], list[dict]]:
+    """Decoded Bomb/Obstacle objects (tokenizer.decode_extras) -> (v2 bomb notes, v2 obstacles)."""
+    from beat_weaver.schemas.normalized import Bomb
+
+    bombs = [{"_time": round(e.beat, 4), "_lineIndex": e.x, "_lineLayer": e.y, "_type": 3, "_cutDirection": 8}
+             for e in extras if isinstance(e, Bomb)]
+    walls = [{"_time": round(e.beat, 4), "_lineIndex": e.x, "_type": 1 if e.height <= 3 else 0, "_width": e.width,
+              "_duration": round(e.duration_beats, 4)} for e in extras if not isinstance(e, Bomb)]
+    return bombs, walls
+
+
+def _build_difficulty_dat(notes: list, version: str = "2.0.0", events: list[dict] | None = None,
+                          bombs: list[dict] | None = None, obstacles: list[dict] | None = None) -> dict:
+    """Build a v2 difficulty .dat structure from decoded notes (and optional lighting events, bombs, walls)."""
+    v2_notes = list(bombs or [])
     for note in notes:
         v2_notes.append({
             "_time": note.beat,
@@ -115,7 +127,7 @@ def _build_difficulty_dat(notes: list, version: str = "2.0.0", events: list[dict
     return {
         "_version": version,
         "_notes": sorted(v2_notes, key=lambda n: n["_time"]),
-        "_obstacles": [],
+        "_obstacles": sorted(obstacles or [], key=lambda o: o["_time"]),
         "_events": events or [],
     }
 
@@ -169,6 +181,7 @@ def export_notes(
     output_dir: Path,
     difficulty: str = "Expert",
     events: dict[str, list[dict]] | None = None,
+    extras: dict[str, tuple[list[dict], list[dict]]] | None = None,
 ) -> Path:
     """Export a note list to a playable v2 Beat Saber map folder.
 
@@ -182,7 +195,8 @@ def export_notes(
         audio_path: Path to the audio file.
         output_dir: Where to create the map folder.
         difficulty: Difficulty name.
-        events: Optional {difficulty: v2 lighting events} (see ``lighting.light_events``).
+        events: Optional {difficulty: v2 lighting events}
+        extras: Optional {difficulty: (v2 bomb notes, v2 obstacles)} from shaping.bombs_and_walls (see ``lighting.light_events``).
 
     Returns:
         Path to the created map folder.
@@ -194,6 +208,7 @@ def export_notes(
     info = _build_info_dat(song_name, bpm, list(by_diff), audio_filename)
     (output_dir / "Info.dat").write_text(json.dumps(info, indent=2), encoding="utf-8")
     for d, ns in by_diff.items():
-        dat = _build_difficulty_dat(ns, events=(events or {}).get(d))
+        bombs, walls = (extras or {}).get(d, ([], []))
+        dat = _build_difficulty_dat(ns, events=(events or {}).get(d), bombs=bombs, obstacles=walls)
         (output_dir / f"{d}.dat").write_text(json.dumps(dat, indent=2), encoding="utf-8")
     return output_dir

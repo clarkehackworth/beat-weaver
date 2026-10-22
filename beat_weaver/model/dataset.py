@@ -23,9 +23,11 @@ from beat_weaver.model.audio import (
     load_manifest,
 )
 from beat_weaver.model.config import ModelConfig
-from beat_weaver.model.tokenizer import encode_beatmap
+from beat_weaver.model.tokenizer import VOCAB_SIZE_NOTES_ONLY, encode_beatmap
 from beat_weaver.schemas.normalized import (
+    Bomb,
     DifficultyInfo,
+    Obstacle,
     Note,
     NormalizedBeatmap,
     SongMetadata,
@@ -319,6 +321,28 @@ class BeatSaberDataset(Dataset):
         # Free the large DataFrame and Arrow table now that samples are built
         del df, table, grouped
 
+        # Bombs and walls, keyed like the samples; missing files just mean none (older processed dirs)
+        extras: dict[str, dict[tuple, list[dict]]] = {"bombs": {}, "obstacles": {}}
+        if self.config.vocab_size > VOCAB_SIZE_NOTES_ONLY:
+            keys = {(s["song_hash"], s["difficulty"], s["characteristic"]) for s in self.samples}
+            for kind in extras:
+                try:
+                    edf = read_notes_parquet(self.processed_dir, kind).to_pandas()
+                except FileNotFoundError:
+                    logger.warning("No %s Parquet in %s; training without them", kind, self.processed_dir)
+                    continue
+                edf = edf.drop(columns=["source", "bpm"], errors="ignore")
+                edf = edf[(edf.x >= 0) & (edf.x <= 3)]
+                kcols = ["song_hash", "difficulty", "characteristic"]
+                edf = edf[pd.MultiIndex.from_frame(edf[kcols]).isin(keys)]
+                if kind == "obstacles":
+                    # ponytail: p90 of walled favourites is ~400 walls; more than 500 is a modchart, not a map
+                    edf = edf[edf.groupby(kcols)["beat"].transform("size") <= 500]
+                for key, g in edf.groupby(kcols):
+                    extras[kind][key] = g.drop(columns=kcols).to_dict("records")
+                logger.info("Loaded %s for %d samples (%d rows)", kind, len(extras[kind]), len(edf))
+                del edf
+
         # Pre-tokenize all samples (deterministic — no need to repeat per epoch)
         # The mel is cut to max_audio_len frames (16 per beat); labels must stop there too
         max_audio_beats = self.config.max_audio_len / 16.0
@@ -362,6 +386,9 @@ class BeatSaberDataset(Dataset):
                 ),
                 notes=notes,
             )
+            key = (sample["song_hash"], sample["difficulty"], sample["characteristic"])
+            beatmap.bombs = [Bomb(**b) for b in extras["bombs"].get(key, []) if b["beat"] < max_audio_beats]
+            beatmap.obstacles = [Obstacle(**w) for w in extras["obstacles"].get(key, []) if w["beat"] < max_audio_beats]
             token_ids = encode_beatmap(beatmap)
 
             # Truncate or pad tokens

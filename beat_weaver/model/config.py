@@ -12,7 +12,7 @@ class ModelConfig:
     """All hyperparameters for the BeatWeaver model."""
 
     # Tokenizer
-    vocab_size: int = 355
+    vocab_size: int = 495  # 355 = notes only (pre-bomb/wall checkpoints); 495 adds BOMB and WALL tokens
     max_seq_len: int = 2048
 
     # Audio
@@ -85,6 +85,7 @@ class ModelConfig:
     # to attend to. Weight of this BCE term in the training loss.
     onset_loss_weight: float = 0.5
     color_balance_weight: float = 0.0  # Weight for color balance auxiliary loss
+    extras_loss_weight: float = 1.0  # Weight on BOMB/WALL (and extras-only POS) targets; <1 keeps bomb learning from pulling note behaviour
     # Two-stage decoding takes BAR/POS/END from the onset head and asks the
     # decoder only what goes at each position, so train it on only that:
     # the token loss covers LEFT/RIGHT targets and nothing else.

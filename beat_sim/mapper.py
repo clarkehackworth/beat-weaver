@@ -39,15 +39,31 @@ PRESET = {
     "Expert":     dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1,   vision_penalty=6, stream_bias=0.6, column_max_run=4, reset_gap=0.5, max_doubles=0.4, max_ebpm=310,  beat_floor=0.3, max_run=20, beat_focus=False),
     "ExpertPlus": dict(min_gap=0.10, doubles_bias=1.0, flow_penalty=4, dynamics=1.5, vision_penalty=6, stream_bias=0.6, column_max_run=4, reset_gap=0.5, max_doubles=0.45, max_ebpm=385, beat_floor=0.3, max_run=32, beat_focus=False),
 }
-# beat_floor / max_run / beat_focus / stream_bias 0.6 / dynamics 1.5: added after Remedy's Expert+ came out as one
+# beat_floor / max_run / beat_focus / stream_bias 0.6 / dynamics 1.5: added after one song's Expert+ came out as one
 # 210-note eighth-note line (93% half-beat gaps, 17 rests/min). Quiet beats now rest, runs are capped and
 # end in a whole-beat rest, extras bunch on the strongest beats, chains take hot sixteenths, loud bars fill more.
 DOUBLES_FRACTION = {"Easy": 0.10, "Normal": 0.15, "Hard": 0.20, "Expert": 0.25, "ExpertPlus": 0.25}
-DENSITY_SCALE = {"Expert": 1.1, "ExpertPlus": 1.1}  # ponytail: generated nps lands ~18% over target and the scorer picked the low candidate; tune per play test
+DENSITY_SCALE = {"Hard": 1.15, "Expert": 1.1, "ExpertPlus": 1.1}  # ponytail: generated nps lands ~18% over target and the scorer picked the low candidate; tune per play test
 DENSITY_BONUS = {"Expert": 10.0, "ExpertPlus": 10.0}  # max points added to the ranking score (not the report)
 DENSITY_VARIANTS = (0.85, 1.0, 1.15)
 # bsmg-guideline shaping applied to every candidate (see beat_weaver/model/shaping.py and docs/MAPPING_GUIDELINES.md)
 SHAPING = {"drift_bias": 1.5, "momentum_bias": 0.5, "flow_window": 1.5, "hand_bias": 0.5, "precision_prior": 0.0, "repeats": 0.7, "emphasis": 0.08}
+# Expert and Expert+ use the recipe play-tested on 4 songs (fix10, 2026-10-21) in place of PRESET + SHAPING:
+# docs/MAPPING_GUIDELINES.md "Play-tested Expert recipe" has the reason for every flag. Per-song knobs
+# (--streams, --dynamics-range) go through the mapper's --extra.
+RECIPE = ("--two-stage --min-gap 0.1 --doubles-bias 3.5 --max-doubles 0.3 --max-ebpm 350 --flow-penalty 4 --dynamics 1 "
+          "--vision-penalty 6 --stream-bias 1.0 --column-max-run 4 --bomb-bias 4 --bomb-gap-bias 8 --bomb-row-bias 3 "
+          "--diagonal-bias 1.5 --hand-balance 10 --walls --crossover-penalty 2 --reversal-penalty 4 --raised-max-run 3 "
+          "--streams 0.12 --stacks --stack-rate 3.3 --stack-bias 4")
+RECIPE_DIFFS = ("Expert", "ExpertPlus")
+# Hard is the scaled-down recipe, generated once with Easy and Normal downmapped from it (generating those two directly
+# gave dense, parity-poor maps). Real Hard maps (150 sampled): 0.7 stacks, 2.4 stream notes, 1 gallop, 11 doubles,
+# 15 crossovers, 23 diagonals per 100 notes, so every pattern flag is milder than the Expert one. A/B on 4 songs,
+# Easy/Normal/Hard mean score: old preset 68/74/78, this 78/84/86 (docs/MAPPING_GUIDELINES.md "Lower difficulties").
+HARD_RECIPE = ("--two-stage --min-gap 0.15 --doubles-bias 0.9 --max-doubles 0.3 --max-ebpm 280 --flow-penalty 4 --dynamics 1 "
+               "--vision-penalty 6 --stream-bias 1.0 --column-max-run 4 --raised-max-run 2 --bomb-bias 4 --bomb-gap-bias 8 "
+               "--bomb-row-bias 3 --diagonal-bias 1.0 --hand-balance 10 --walls --crossover-penalty 4 --reversal-penalty 4 "
+               "--streams 0.05 --stacks --stack-rate 0.7 --stack-bias 2")
 DOWNMAP_FROM = {"Easy": "Hard", "Normal": "Hard", "Hard": "Hard"}  # ponytail: Hard is generated; Easy/Normal are thinned from it  # ponytail: two hedges around the preset; widen if winners sit at an edge
 
 
@@ -66,7 +82,12 @@ def target_nps(diff: str) -> float:
     return (lo + hi) / 2 / (1 + DOUBLES_FRACTION[diff]) * DENSITY_SCALE.get(diff, 1.0)
 
 
-def flags_for(diff: str, nps: float, seed: int, downmap: tuple[str, ...] = ()) -> str:
+def flags_for(diff: str, nps: float, seed: int, downmap: tuple[str, ...] = (), extra: str = "") -> str:
+    if diff in RECIPE_DIFFS:  # later flags win in argparse, so --extra overrides the recipe
+        return f"{RECIPE} --notes-per-second {nps:.2f} --seed {seed} {extra}".strip()
+    if diff == "Hard":
+        dm = (" --downmap " + " ".join(downmap)) if downmap else ""
+        return f"{HARD_RECIPE} --notes-per-second {nps:.2f} --seed {seed}{dm} {extra}".strip()
     p = PRESET[diff]
     sh = " ".join(f"--{k.replace('_', '-')} {v}" for k, v in SHAPING.items())
     dm = (" --downmap " + " ".join(downmap)) if downmap else ""
@@ -190,6 +211,8 @@ def main() -> None:
     ap.add_argument("--mapper", help="level author name (default: $BW_MAPPER, then the user config file, then BeatWeaver AI)")
     ap.add_argument("--no-web-cover", action="store_true", help="don't look the cover up on YouTube / iTunes")
     ap.add_argument("--cover", type=Path, help="cover image to put in the map (default: art embedded in the audio, else looked up on the web)")
+    ap.add_argument("--extra", default="", help="flags appended to Hard/Expert/Expert+ generation, e.g. "
+                    "'--streams 0.18 --dynamics-range 0.7 1.3' for a song with uneven sections")
     ap.add_argument("--score-only", action="store_true", help="rescore candidates already fetched")
     args = ap.parse_args()
 
@@ -219,7 +242,7 @@ def main() -> None:
                 out_dir = shlex.quote(f"{REMOTE_ROOT}/{stem}_candidates/{name}")
                 cmd = (f"cd /data && {ENV} python -m beat_weaver.cli generate --checkpoint {args.checkpoint} "
                        f"--audio {REMOTE_ROOT}/{shlex.quote(remote_song)} --difficulty {diff} --output {out_dir} "
-                       f"{flags_for(diff, nps, seed, downmap)}")
+                       f"{flags_for(diff, nps, seed, downmap, args.extra)}")
                 print(f"generate {name} ...", end="", flush=True)
                 log = remote(cmd)
                 print(" " + (log.strip().splitlines() or ["done"])[-1])

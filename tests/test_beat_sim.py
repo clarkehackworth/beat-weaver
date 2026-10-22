@@ -91,12 +91,15 @@ def test_ladder_forces_rising_density_and_prefers_total_score():
 def test_mapper_expertplus_candidates_can_use_beat_focus():
     from beat_sim.mapper import flags_for
 
-    from beat_sim.mapper import PRESET
-    assert ("--beat-focus" in flags_for("ExpertPlus", 4.2, 0)) == PRESET["ExpertPlus"]["beat_focus"]
     assert "--seed 1" in flags_for("Expert", 3.3, 1)
     assert "--downmap Easy Normal" in flags_for("Hard", 2.0, 0, ("Easy", "Normal"))
     assert "--downmap" not in flags_for("Hard", 2.0, 0)
-    assert "--drift-bias" in flags_for("Expert", 3.3, 1)
+    assert "--drift-bias" in flags_for("Normal", 2.0, 1)
+    # Expert/Expert+ take the play-tested recipe; --extra comes last so argparse lets it override
+    flags = flags_for("ExpertPlus", 4.2, 0, extra="--streams 0.18")
+    hard = flags_for("Hard", 3.1, 0, ("Easy", "Normal"))
+    assert "--stack-bias 2" in hard and "--downmap Easy Normal" in hard and "--drift-bias" not in hard
+    assert "--stack-bias 4" in flags and "--drift-bias" not in flags and flags.endswith("--streams 0.18")
 
 
 def test_merge_writes_song_metadata_and_cover(tmp_path):
@@ -112,18 +115,18 @@ def test_merge_writes_song_metadata_and_cover(tmp_path):
         entry = {"_difficulty": diff, "_difficultyRank": 1, "_beatmapFilename": f"{diff}.dat",
                  "_noteJumpMovementSpeed": 10, "_noteJumpStartBeatOffset": 0}
         (d / "Info.dat").write_text(json.dumps({
-            "_songName": "lying", "_songAuthorName": "", "_levelAuthorName": "BeatWeaver AI", "_beatsPerMinute": 80.0,
+            "_songName": "sample", "_songAuthorName": "", "_levelAuthorName": "BeatWeaver AI", "_beatsPerMinute": 80.0,
             "_previewStartTime": 12, "_coverImageFilename": "",
             "_difficultyBeatmapSets": [{"_beatmapCharacteristicName": "Standard", "_difficultyBeatmaps": [entry]}]}))
         return d
 
     cover = tmp_path / "cover.png"
     cover.write_bytes(b"png")
-    meta = {"_songName": "Lying From You", "_songAuthorName": "Linkin Park & Eminem", "_levelAuthorName": "Test Mapper",
+    meta = {"_songName": "Other Song", "_songAuthorName": "Example Band & Guest Act", "_levelAuthorName": "Test Mapper",
             "_previewStartTime": 117.1}
     out = merge({"Expert": fake("Expert"), "Easy": fake("Easy")}, tmp_path / "out", meta, cover)
     info = json.loads((out / "Info.dat").read_text())
-    assert (info["_songName"], info["_songAuthorName"], info["_levelAuthorName"]) == ("Lying From You", "Linkin Park & Eminem", "Test Mapper")
+    assert (info["_songName"], info["_songAuthorName"], info["_levelAuthorName"]) == ("Other Song", "Example Band & Guest Act", "Test Mapper")
     assert info["_previewStartTime"] == 117.1 and info["_beatsPerMinute"] == 80.0
     assert info["_coverImageFilename"] == "cover.png" and (out / "cover.png").exists()
     assert [b["_difficulty"] for b in info["_difficultyBeatmapSets"][0]["_difficultyBeatmaps"]] == ["Easy", "Expert"]
@@ -165,9 +168,9 @@ def test_web_cover_prefers_the_result_closest_to_the_file_name(monkeypatch):
     def page(*items):
         return "".join(f'"videoRenderer":{{"videoId":"{vid}","title":{{"runs":[{{"text":"{title}"}}]}},"ownerText":{{"runs":[{{"text":"chan"}}]}}' for vid, title in items).encode()
 
-    html = page(("LIVEVIDEO11", "LISA Performs SaWaDiKa | 2026 VMAs"),
-                ("COVERVIDEO1", "LISA - SaWaDiKa (Cover by Someone)"),
-                ("OFFICIAL111", "LISA - SaWaDiKa (Official Music Video)"))
+    html = page(("LIVEVIDEO11", "Example Band Performs Sample Song | 2026 Awards"),
+                ("COVERVIDEO1", "Example Band - Sample Song (Cover by Someone)"),
+                ("OFFICIAL111", "Example Band - Sample Song (Official Music Video)"))
     asked = []
 
     def fake_get(url, timeout=10.0):
@@ -175,10 +178,10 @@ def test_web_cover_prefers_the_result_closest_to_the_file_name(monkeypatch):
         return html if "youtube.com/results" in url else _jpeg()
 
     monkeypatch.setattr(meta, "_get", fake_get)
-    data, src = meta.youtube_cover("SaWaDiKa", "LISA", hint="LISA - SaWaDiKa (Official Music Video)")
+    data, src = meta.youtube_cover("Sample Song", "Example Band", hint="Example Band - Sample Song (Official Music Video)")
     assert "OFFICIAL111" in src and "OFFICIAL111" in asked[-1], (src, asked)
     assert all("COVERVIDEO1" not in a for a in asked), "cover versions are never chosen"
-    assert "LISA+-+SaWaDiKa" in asked[0] or "LISA%20-%20SaWaDiKa" in asked[0], "searches the file name, not just title and artist"
+    assert "Example+Band+-+Sample+Song" in asked[0] or "Example%20Band%20-%20Sample%20Song" in asked[0], "searches the file name, not just title and artist"
 
 
 def test_web_cover_needs_a_match_and_falls_back_to_itunes_then_to_nothing(monkeypatch, tmp_path):
@@ -187,7 +190,7 @@ def test_web_cover_needs_a_match_and_falls_back_to_itunes_then_to_nothing(monkey
     import beat_sim.meta as meta
 
     unrelated = '"videoRenderer":{"videoId":"ZZZZZZZZZZZ","title":{"runs":[{"text":"Cooking pasta"}]}'.encode()
-    itunes = json.dumps({"results": [{"trackName": "Gasoline", "artistName": "Halsey", "collectionName": "Badlands",
+    itunes = json.dumps({"results": [{"trackName": "Sample Song", "artistName": "Example Band", "collectionName": "Sample Album",
                                       "artworkUrl100": "https://x/100x100bb.jpg"}]}).encode()
 
     def fake_get(url, timeout=10.0):
@@ -198,7 +201,7 @@ def test_web_cover_needs_a_match_and_falls_back_to_itunes_then_to_nothing(monkey
         return _jpeg(300, 300)
 
     monkeypatch.setattr(meta, "_get", fake_get)
-    name, src = meta.extract_cover(tmp_path / "x.mp3", tmp_path, None, "Gasoline", "Halsey")
+    name, src = meta.extract_cover(tmp_path / "x.mp3", tmp_path, None, "Sample Song", "Example Band")
     assert name == "cover.jpg" and "iTunes" in src
     from PIL import Image
 
@@ -208,8 +211,8 @@ def test_web_cover_needs_a_match_and_falls_back_to_itunes_then_to_nothing(monkey
         raise OSError("no network")
 
     monkeypatch.setattr(meta, "_get", offline)
-    assert meta.extract_cover(tmp_path / "x.mp3", tmp_path / "none", None, "Gasoline", "Halsey")[0] == ""
-    assert meta.extract_cover(tmp_path / "x.mp3", tmp_path, None, "Gasoline", "Halsey", web=False)[0] == ""
+    assert meta.extract_cover(tmp_path / "x.mp3", tmp_path / "none", None, "Sample Song", "Example Band")[0] == ""
+    assert meta.extract_cover(tmp_path / "x.mp3", tmp_path, None, "Sample Song", "Example Band", web=False)[0] == ""
 
 
 def test_youtube_thumbnail_is_centre_cropped_to_a_square():
@@ -258,3 +261,25 @@ def test_fine_timing_share():
     assert abs(stats(mixed, 120.0)["fine"] - 2 / 8) < 1e-9
     shifted = [mk(x.beat + 0.07) for x in on]  # a constant offset is not imprecision
     assert stats(shifted, 120.0)["fine"] == 0.0
+
+
+def test_loloppe_and_shrado():
+    from beat_sim.rhythm import stats
+    bpm, beat = 120.0, 0.5
+    mk = lambda t, x, y, c, d: Note(beat=t / beat, time_seconds=t, x=x, y=y, color=c, cut_direction=d)
+    # two reds side by side both cutting down: loloppe; stacked vertically cutting down is a clean stack
+    side = [mk(1.0, 1, 1, 0, 1), mk(1.0, 2, 1, 0, 1), mk(2.0, 0, 0, 1, 0)]
+    stack = [mk(1.0, 1, 0, 0, 1), mk(1.0, 1, 1, 0, 1), mk(2.0, 0, 0, 1, 0)]
+    assert stats(side, bpm)["loloppe"] == 0.5 and stats(stack, bpm)["loloppe"] == 0.0
+    # red down-left in lane 0, then red up in lane 2: shrado; same in lane 1 spans only 2 lanes
+    sh = [mk(1.0, 0, 2, 0, 6), mk(1.5, 2, 0, 0, 0), mk(1.0, 3, 1, 1, 1), mk(1.5, 3, 1, 1, 0)]
+    ok = [mk(1.0, 0, 2, 0, 6), mk(1.5, 1, 0, 0, 0), mk(1.0, 3, 1, 1, 1), mk(1.5, 3, 1, 1, 0)]
+    assert stats(sh, bpm)["shrado"] == 50.0 and stats(ok, bpm)["shrado"] == 0.0
+
+
+def test_gap_stats_are_not_overwritten_by_the_fine_check():
+    # `fine` once reused the gap array's name, which pinned gap_le_half/gap_1/gap_ge2 to ~0.55/0.13/0 for every map
+    from beat_sim.rhythm import stats
+    notes = [Note(beat=b, time_seconds=b * 0.5, x=1, y=0, color=0, cut_direction=b % 2) for b in range(20)]
+    s = stats(notes, 120.0)
+    assert s["gap_le_half"] == 0.0 and s["gap_ge2"] == 0.0 and s["gap_1"] > 0.9

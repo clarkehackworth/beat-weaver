@@ -55,7 +55,7 @@ def _make_beatmap(difficulty: str, notes: list[Note]) -> NormalizedBeatmap:
 
 class TestVocabulary:
     def test_vocab_size(self):
-        assert VOCAB_SIZE == 355
+        assert VOCAB_SIZE == 495
 
     def test_token_ranges_no_overlap(self):
         """All token ranges should be contiguous and non-overlapping."""
@@ -63,7 +63,7 @@ class TestVocabulary:
         # LEFT_EMPTY=73, LEFT=74-181, RIGHT_EMPTY=182, RIGHT=183-290
         assert LEFT_BASE + 108 == RIGHT_EMPTY  # 74 + 108 = 182
         assert RIGHT_BASE + 108 == BAR_BASE  # 183 + 108 = 291
-        assert BAR_BASE + BAR_COUNT == VOCAB_SIZE  # 291 + 64 = 355
+        assert BAR_BASE + BAR_COUNT == 355  # notes-only vocab; BOMB 355-366, WALL 367-494
 
 
 class TestCompoundTokenEncoding:
@@ -189,16 +189,21 @@ class TestEncodeBeatmap:
         bar_count = sum(1 for t in tokens if is_bar_token(t))
         assert bar_count == 2  # bar 0 and bar 1
 
-    def test_duplicate_same_hand_logs(self, caplog):
-        """Two left notes at same beat should log debug and keep first."""
+    def test_same_hand_stack_round_trips(self):
+        """A hand's notes at one beat (stack, tower) are all encoded, ascending cell order, and all decode."""
         notes = [
-            Note(beat=0.0, time_seconds=0.0, x=0, y=0, color=0, cut_direction=0),
             Note(beat=0.0, time_seconds=0.0, x=1, y=1, color=0, cut_direction=1),
+            Note(beat=0.0, time_seconds=0.0, x=1, y=0, color=0, cut_direction=1),
+            Note(beat=0.0, time_seconds=0.0, x=3, y=2, color=1, cut_direction=1),
+            Note(beat=0.0, time_seconds=0.0, x=3, y=0, color=1, cut_direction=1),
+            Note(beat=0.0, time_seconds=0.0, x=3, y=1, color=1, cut_direction=1),
         ]
-        bm = _make_beatmap("Expert", notes)
-        with caplog.at_level(logging.DEBUG, logger="beat_weaver.model.tokenizer"):
-            tokens = encode_beatmap(bm)
-        assert any("Duplicate left note" in msg for msg in caplog.messages)
+        tokens = encode_beatmap(_make_beatmap("Expert", notes))
+        assert tokens[3:9] == [POS_BASE, _encode_note_token(LEFT_BASE, 1, 0, 1), _encode_note_token(LEFT_BASE, 1, 1, 1),
+                               _encode_note_token(RIGHT_BASE, 3, 0, 1), _encode_note_token(RIGHT_BASE, 3, 1, 1),
+                               _encode_note_token(RIGHT_BASE, 3, 2, 1)]
+        back = decode_tokens(tokens, 120.0)
+        assert sorted((n.x, n.y, n.color) for n in back) == sorted((n.x, n.y, n.color) for n in notes)
 
 
 class TestDecodeTokens:
@@ -304,3 +309,26 @@ class TestIndexedBars:
         tokens = encode_beatmap(bm)
         assert max(t for t in tokens if is_bar_token(t)) == bar_token(BAR_COUNT - 1)
         assert all(n.beat < 256 for n in decode_tokens(tokens, 120.0))
+
+
+def test_bombs_and_walls_round_trip():
+    from beat_weaver.model.tokenizer import decode_extras, encode_wall, decode_wall, is_bomb_token, is_wall_token
+    from beat_weaver.schemas.normalized import Bomb, Obstacle
+
+    for x in range(4):
+        for w in range(1, 5 - x):
+            for crouch in (False, True):
+                for d in (0.5, 1.0, 2.0, 4.0):
+                    assert decode_wall(encode_wall(x, w, crouch, d)) == (x, w, crouch, d)
+    assert decode_wall(encode_wall(3, 4, False, 3.0))[1] == 1  # width clipped to the grid, 3 beats -> nearest bucket
+    bm = _make_beatmap("Expert", [Note(beat=1.0, time_seconds=0.5, x=0, y=0, color=0, cut_direction=1)])
+    bm.bombs = [Bomb(beat=1.0, time_seconds=0.5, x=3, y=1), Bomb(beat=1.0, time_seconds=0.5, x=2, y=1),  # a cluster
+               Bomb(beat=1.0, time_seconds=0.5, x=2, y=1),  # duplicate cell: kept once
+               Bomb(beat=2.5, time_seconds=1.25, x=1, y=2)]  # on an empty position
+    bm.obstacles = [Obstacle(beat=4.0, time_seconds=2.0, duration_beats=2.0, x=0, y=2, width=4, height=3)]
+    toks = encode_beatmap(bm)
+    assert sum(is_bomb_token(t) for t in toks) == 3 and sum(is_wall_token(t) for t in toks) == 1
+    bombs, walls = decode_extras(toks, 120.0)
+    assert [(b.beat, b.x, b.y) for b in bombs] == [(1.0, 2, 1), (1.0, 3, 1), (2.5, 1, 2)]  # ascending cell order
+    assert [(w.beat, w.x, w.width, w.height, w.duration_beats) for w in walls] == [(4.0, 0, 4, 3, 2.0)]
+    assert [(n.beat, n.x) for n in decode_tokens(toks, 120.0)] == [(1.0, 0)]

@@ -100,7 +100,7 @@ export BW_HOST=user@gpu-host
 ## The loop
 
 ```
-python -m beat_sim.loop --tag r1 --songs lying sawadika \
+python -m beat_sim.loop --tag r1 --songs song1 song2 \
     --grid "notes-per-beat=1.0,1.5,2.0" "min-gap=0.1,0.15"   # --two-stage is the default; add flags with --extra="--temperature 0.9"
 ```
 

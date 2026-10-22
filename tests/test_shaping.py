@@ -199,7 +199,7 @@ def test_gate_patterns_limits_distinct_cells_on_easy():
 
 
 def test_gate_patterns_removes_cut_through_pairs():
-    # blue stack at the bottom of column 3 cutting up into a red on the top row (seen in Remedy Expert)
+    # blue stack at the bottom of column 3 cutting up into a red on the top row (seen in a generated Expert map)
     notes = [N(0.0, 3, 0, 1, 0), N(0.0, 3, 1, 1, 0), N(0.0, 3, 2, 0, 0),
              N(2.0, 0, 2, 1, 1), N(2.0, 0, 0, 0, 1)]  # blue top of column 0 cutting down into red two below
     out = shaping.gate_patterns(notes, BPM, "ExpertPlus")
@@ -209,3 +209,108 @@ def test_gate_patterns_removes_cut_through_pairs():
                 if l.color == 0 and r.color == 1:
                     assert not shaping._converging(l, r), (l, r)
     assert len(out) >= 4  # resolved by reversing / trimming the stack, not by deleting everything
+
+
+def test_vocal_snap_moves_only_led_hits_within_tolerance():
+    hop_s = 0.01
+    lead = np.zeros(1000)
+    lead[400:] = 3.0  # vocal-led from 4 s on
+    # 1.06 s: not vocal-led, stays. 4.02 s: beat 8.04 -> nearest grid 8.0, stays. 6.30 s: 0.6 beats off, too far.
+    peaks = np.array([1.06, 4.02, 6.30])
+    notes = [N(1.0, 0, 0, 0, 1), N(4.0, 1, 0, 1, 1), N(6.0, 2, 0, 0, 1)]
+    out = shaping.vocal_snap(notes, BPM, lead, peaks, hop_s)
+    assert [n.time_seconds for n in out] == [1.0, 4.0, 6.0]
+    # 4.085 s = beat 8.17: nearer the 1/12 grid (8.1667) than 1/8 (8.125), so a triplet placement
+    out = shaping.vocal_snap(notes, BPM, lead, np.array([4.085]), hop_s)
+    assert abs(out[1].beat - 8 - 1 / 6) < 1e-9 and out[1].time_seconds == out[1].beat * 60 / BPM
+    # the target time already held by another hit: stay put
+    held = notes + [N(4.0 + 60 / BPM / 6, 2, 0, 0, 1)]
+    out = shaping.vocal_snap(held, BPM, lead, np.array([4.085]), hop_s)
+    assert sorted(n.time_seconds for n in out) == sorted(n.time_seconds for n in held)
+
+
+def test_bombs_and_walls():
+    # left hand: down-cut, 3-beat rest, down-cut again -> bomb low at 2/3 of the gap
+    notes = [N(0.0, 0, 1, 0, 1), N(1.5, 0, 1, 0, 1), N(1.5, 3, 1, 1, 0), N(6.0, 3, 1, 1, 0)]
+    bombs, walls = shaping.bombs_and_walls(notes, BPM)
+    assert [(b["_time"], b["_lineLayer"], b["_type"]) for b in bombs] == [(2.0, 0, 3), (9.0, 2, 3)]
+    assert [w for w in walls if w["_type"] == 1] == [{"_time": 4.0, "_lineIndex": 0, "_type": 1, "_width": 4, "_duration": 7.0}]
+    # alternating cuts need no reset; short rests get no wall
+    short = shaping.bombs_and_walls([N(0.0, 0, 1, 0, 1), N(1.5, 0, 1, 0, 0)], BPM)
+    assert short[0] == [] and not [w for w in short[1] if w["_type"] == 1]
+
+
+def test_limit_extras_drops_bad_walls_and_caps_the_rest():
+    notes = [N(t, 1, 0, 0, 1) for t in np.arange(0, 32, 0.5)]  # beats 0-63, lane 1, bottom row
+    w = lambda t, x, ty, wd, d: {"_time": t, "_lineIndex": x, "_type": ty, "_width": wd, "_duration": d}
+    walls = [w(4, 0, 0, 1, 0.5),   # too short
+             w(8, 0, 0, 3, 2.0),   # full-height 3-wide
+             w(12, 1, 0, 1, 2.0),  # covers the lane-1 notes
+             w(16, 1, 1, 2, 2.0),  # crouch over notes in its lanes: dropped (hidden while ducking)
+             w(20, 3, 0, 1, 4.0), w(28, 3, 0, 1, 1.0), w(36, 0, 0, 1, 2.0),
+             w(40, 0, 0, 1, 2.0)]  # lane 0 is clear, but a note sits at 42, inside the half-beat tail: dropped
+    bombs = [{"_time": 2.0, "_lineIndex": 1, "_lineLayer": 2, "_type": 3, "_cutDirection": 8},   # on a note's column
+             {"_time": 2.0, "_lineIndex": 3, "_lineLayer": 2, "_type": 3, "_cutDirection": 8}]
+    b, kept = shaping.limit_extras(bombs, walls, notes, BPM, walls_per_bar=0.25)  # starts >= 16 beats apart
+    assert [x["_time"] for x in kept] == [20, 36]  # 28 sits too close to the longer wall at 20
+    assert [x["_lineIndex"] for x in b] == [3]  # same instant = a cluster: the one on the notes' column is dropped
+    assert shaping.limit_extras(bombs, walls, notes, BPM, walls_per_bar=0)[1] == []
+
+
+def test_lane_walls_take_the_free_half_and_leave_the_notes_alone():
+    # notes only in lanes 2-3 for beats 0-20: the left half (lanes 0-1) is free for walls, one per 4 beats
+    notes = [N(t * 60 / BPM, 2 + int(t) % 2, 0, 1, 1) for t in np.arange(0, 20, 0.5)]
+    _, walls = shaping.bombs_and_walls(notes, BPM, bombs=False, walls=True)
+    lane = [w for w in walls if w["_type"] == 0]
+    assert lane and all(w["_lineIndex"] == 0 and w["_width"] == 2 for w in lane)
+    assert all(b["_time"] - a["_time"] >= 4 for a, b in zip(lane, lane[1:]))
+    # notes in every lane: no free half or outer lane, no wall
+    both = [N(t * 60 / BPM, int(2 * t) % 4, 0, 1, 1) for t in np.arange(0, 20, 0.5)]  # every lane, every 2 beats
+    assert not [w for w in shaping.bombs_and_walls(both, BPM, bombs=False, walls=True)[1] if w["_type"] == 0]
+    # lanes 1-2 busy: no free half, so 1-wide walls in the empty outer lane 0
+    mid = [N(t * 60 / BPM, 1 + int(t) % 2, 0, 1, 1) for t in np.arange(0, 20, 0.5)]
+    lane = [w for w in shaping.bombs_and_walls(mid, BPM, bombs=False, walls=True)[1] if w["_type"] == 0]
+    assert lane and all(w["_lineIndex"] == 0 and w["_width"] == 1 for w in lane)
+
+
+def test_bombs_beside_a_note_within_a_beat_are_moved_clear():
+    notes = [N(0.0, 1, 0, 0, 1)]  # beat 0, lane 1 bottom
+    b = lambda t, x, y: {"_time": t, "_lineIndex": x, "_lineLayer": y, "_type": 3, "_cutDirection": 8}
+    kept, _ = shaping.limit_extras([b(0.5, 2, 1), b(1.5, 2, 0), b(0.25, 3, 2)], [], notes, BPM)
+    # (2,1) is diagonal-adjacent to the note: moved up to (2,2), clear of it; the others were clear already
+    assert [(x["_time"], x["_lineIndex"], x["_lineLayer"]) for x in kept] == [(0.5, 2, 2), (1.5, 2, 0), (0.25, 3, 2)]
+    # a bomb row at one instant: the cell beside the note is dropped, the rest of the row stays where it is
+    row, _ = shaping.limit_extras([b(0.25, x, 1) for x in range(4)], [], notes, BPM)
+    assert [x["_lineIndex"] for x in row] == [3]
+    # a row half a beat from the note keeps all its cells: row cells only count within a quarter beat
+    far, _ = shaping.limit_extras([b(0.4, x, 1) for x in range(4)], [], notes, BPM)
+    assert [x["_lineIndex"] for x in far] == [0, 1, 2, 3]
+
+
+def test_bombs_on_a_hands_route_between_notes_are_moved_off_it():
+    # left hand cuts down at (0,0), then up at (0,1) a beat and a half later: the saber comes back up through (0,0)
+    notes = [N(0.0, 0, 0, 0, 1), N(1.5 * 60 / BPM, 0, 1, 0, 0)]
+    b = {"_time": 1.0, "_lineIndex": 0, "_lineLayer": 0, "_type": 3, "_cutDirection": 8}
+    assert shaping._on_swing_route(b, notes)
+    kept, _ = shaping.limit_extras([b], [], notes, BPM)
+    assert kept and not shaping._on_swing_route(kept[0], notes) and kept[0]["_lineIndex"] >= 2
+    # the other side of the grid is clear of that route
+    assert not shaping._on_swing_route({**b, "_lineIndex": 3, "_lineLayer": 2}, notes)
+
+
+def test_overlapping_walls_keep_the_longer():
+    w = lambda t, x, wd, d: {"_time": t, "_lineIndex": x, "_type": 0, "_width": wd, "_duration": d}
+    kept = shaping.drop_overlapping_walls([w(0, 0, 2, 2.0), w(0.5, 1, 1, 1.0), w(2.25, 0, 1, 1.0), w(0, 3, 1, 1.0), w(3, 0, 1, 1.0)])
+    assert [(k["_time"], k["_lineIndex"]) for k in kept] == [(0, 0), (0, 3), (3, 0)]
+
+
+def test_stacked_notes_whose_swings_cross_are_resolved():
+    # red up-cut above a blue down-cut: each saber has to come through the other note's cell
+    up, down = N(0.0, 0, 1, 0, 0), N(0.0, 0, 0, 1, 1)
+    assert shaping._approaches_through(up, down) and shaping._approaches_through(down, up)
+    assert shaping._converging(up, down)
+    kept = shaping._resolve_collisions([[up, down]])[0]
+    assert len(kept) == 1 or not shaping._converging(*sorted(kept, key=lambda n: n.color))
+    # same stack cutting the same way is fine to approach (blue down under red down is cuts-through, handled elsewhere);
+    # a pair a cell apart on different rows with the sabers coming from clear cells stays
+    assert not shaping._approaches_through(N(0.0, 0, 1, 0, 0), N(0.0, 3, 1, 1, 0))

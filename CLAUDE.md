@@ -52,7 +52,7 @@ Install: `pip install -e .` (core) or `pip install -e ".[ml]"` (with ML dependen
 - `beat_weaver.sources.beatsaver` — BeatSaver API client + downloader
 - `beat_weaver.sources.unity_extractor` — official map + audio extraction from Unity bundles (base + DLC)
 - `beat_weaver.storage.writer` — Parquet output (notes/bombs/obstacles)
-- `beat_weaver.model.tokenizer` — encode/decode beatmaps ↔ token sequences (291 vocab)
+- `beat_weaver.model.tokenizer` — encode/decode beatmaps ↔ token sequences (495 vocab: 355 note tokens + 12 BOMB + 128 WALL)
 - `beat_weaver.model.audio` — mel spectrogram extraction, beat-aligned framing, BPM auto-detection
 - `beat_weaver.model.transformer` — AudioEncoder (Conformer or Transformer) + TokenDecoder + BeatWeaverModel (RoPE or sinusoidal PE)
 - `beat_weaver.model.inference` — autoregressive generation with grammar mask + windowed full-song generation
@@ -78,8 +78,8 @@ See [RESEARCH.md](RESEARCH.md) for research details, [plans/002-ml-model.md](pla
 - **Audio input:** Log-mel spectrogram (80 bins, sr=22050, hop=512), beat-aligned to 1/16th note grid. Optional onset strength channel (+1 bin).
 - **Positional encoding:** RoPE (default) or sinusoidal (config.use_rope=False). RoPE applied to self-attention Q/K only (not cross-attention).
 - **Scope:** Color notes only (no bombs, walls, arcs, chains until core model performs well)
-- **Output:** Beat-quantized compound tokens (291 vocab) → v2 Beat Saber JSON
-- **Token format:** `START DIFF BAR POS LEFT RIGHT ... BAR ... END`
+- **Output:** Beat-quantized compound tokens (495 vocab: 355 note tokens + 12 BOMB + 128 WALL) → v2 Beat Saber JSON
+- **Token format:** `START DIFF BAR POS LEFT RIGHT ... BAR ... END` (a hand may emit several notes at one POS in ascending cell order with the same cut: stacks, towers, windows, sliders)
 - **Training:** Cross-entropy with label smoothing + optional color balance auxiliary loss, AdamW + cosine LR, mixed-precision, early stopping, weighted sampling (official 20% of batch, custom weighted by BeatSaver score)
 - **Data augmentation:** SpecAugment (time/frequency masking, training split only)
 - **Data filtering:** By difficulty (min_difficulty), characteristic, BPM range. Out-of-grid notes filtered during pre-tokenization.

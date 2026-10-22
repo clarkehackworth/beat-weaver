@@ -12,6 +12,8 @@ All passes return a new sorted list and never move a note in time.
 """
 from __future__ import annotations
 
+import collections
+import math
 from dataclasses import replace
 
 import numpy as np
@@ -24,7 +26,7 @@ DIFFS = ("Easy", "Normal", "Hard", "Expert", "ExpertPlus")
 # Favourites' notes-per-second band midpoints (beat_sim/rhythm.py BANDS). bsmg says ~20% fewer notes per
 # step, but the reference maps step harder at the bottom (Hard -> Normal -> Easy is x0.69, x0.65), so a
 # downmap keeps the ratio of these targets rather than a flat 0.8.
-TARGET_NPS = {"Easy": 1.20, "Normal": 2.23, "Hard": 3.25, "Expert": 4.16, "ExpertPlus": 5.22}
+TARGET_NPS = {"Easy": 1.50, "Normal": 2.23, "Hard": 3.25, "Expert": 4.16, "ExpertPlus": 5.22}
 # Easy sits near the bottom of the favourites band (1.09-1.83) rather than its midpoint: the favourites are an
 # Expert+ player's picks and their Easy runs well above official Easy (~0.8/s); play test said it felt hard.
 _REVERSE = {0: 1, 1: 0, 2: 3, 3: 2, 4: 7, 7: 4, 5: 6, 6: 5, 8: 8}
@@ -102,8 +104,9 @@ def downmap(notes: list[Note], bpm: float, src: str, dst: str, strength: np.ndar
 
 
 def _converging(l: Note, r: Note) -> bool:
-    """Same-time pair whose cuts drive the sabers into each other (mirrors beat_sim.rhythm._converging)."""
-    if _cuts_through(l, r) or _cuts_through(r, l):
+    """Same-time pair whose cuts drive the sabers into each other (mirrors beat_sim.rhythm._converging),
+    or where one saber must arrive through the other note's cell (``_approaches_through``)."""
+    if _cuts_through(l, r) or _cuts_through(r, l) or _approaches_through(l, r) or _approaches_through(r, l):
         return True
     if l.cut_direction == 8 or r.cut_direction == 8:
         return False
@@ -122,6 +125,16 @@ def _cuts_through(a: Note, b: Note) -> bool:
         return False
     v = CUT_VEC[a.cut_direction]
     return any((a.x + k * v[0], a.y + k * v[1]) == (b.x, b.y) for k in (1, 2))
+
+
+def _approaches_through(a: Note, b: Note) -> bool:
+    """a's saber arrives from the cell behind it (one step against its cut) and b sits there: a red up-cut
+    over a blue down-cut has each saber come through the other note (seen in play testing). Real Expert
+    maps: median 0, p99 0.5% of their doubles."""
+    if a.cut_direction not in range(8):
+        return False
+    v = CUT_VEC[a.cut_direction]
+    return (a.x - v[0], a.y - v[1]) == (b.x, b.y)
 
 
 def repair_parity(notes: list[Note], bpm: float, window_beats: float = 2.0) -> list[Note]:
@@ -189,6 +202,11 @@ def _simplify_cut(cut: int, allowed: set[int], prev: int | None) -> int:
         return cut
     if cut >= 4:
         v = 0 if CUT_VEC[cut][1] > 0 else 1
+        h = 3 if CUT_VEC[cut][0] > 0 else 2
+        # A downward diagonal after a vertical cut keeps its sideways part where the tier allows it (Normal);
+        # otherwise Normal came out 98% up/down against 57-83% in the favourites.
+        if v == 1 and prev in (0, 1) and h in allowed:
+            return h
         if v in allowed:
             return v
     if cut in (2, 3) and {0, 1} <= allowed:
@@ -248,7 +266,7 @@ def gate_patterns(notes: list[Note], bpm: float, difficulty: str) -> list[Note]:
                 for n in grp[1:]:
                     h.remove(n)
             elif len(grp) > 1 and not t["towers"]:
-                wide = max(abs(a.x - b.x) + abs(a.y - b.y) for a in grp for b in grp) > 1
+                wide = max(max(abs(a.x - b.x), abs(a.y - b.y)) for a in grp for b in grp) > 1  # diagonal stacks are adjacent
                 for n in grp[2 if not wide else 1:]:  # towers to stacks, windows to singles
                     h.remove(n)
     # doubles: thin to the cap, alternating which hand keeps the note
@@ -304,7 +322,7 @@ def _resolve_collisions(hits: list[list[Note]]) -> list[list[Note]]:
         for l, r in bad(h):  # 2. reverse the cut that runs through the other note
             for n in (l, r):
                 other = r if n is l else l
-                if _cuts_through(n, other) and n in h:
+                if (_cuts_through(n, other) or _approaches_through(n, other)) and n in h:
                     cand = replace(n, cut_direction=_REVERSE[n.cut_direction])
                     if not _converging(cand, other) and not _converging(other, cand):
                         h[h.index(n)] = cand
@@ -315,7 +333,7 @@ def _resolve_collisions(hits: list[list[Note]]) -> list[list[Note]]:
                     h.remove(n)
         while bad(h):  # 4. drop the offender (the note whose blade runs through the other)
             l, r = bad(h)[0]
-            h.remove(l if _cuts_through(l, r) else r)
+            h.remove(l if _cuts_through(l, r) or _approaches_through(l, r) else r)
     return hits
 
 
@@ -481,6 +499,229 @@ def onset_strength(audio: np.ndarray, sr: int, hop: int = 512) -> tuple[np.ndarr
     rms = np.sqrt((np.asarray(audio[: n * hop], dtype=np.float32).reshape(n, hop) ** 2).mean(axis=1))
     rise = np.diff(np.log1p(rms * 100), prepend=0.0).clip(min=0)
     return rise + 0.25 * rms / (rms.max() or 1.0), hop / sr
+
+
+# --- 4. vocal snapping (backlog 8) ------------------------------------------------------------------------------
+def vocal_signal(audio: np.ndarray, sr: int, hop: int = 512) -> tuple[np.ndarray, np.ndarray, float]:
+    """(vocal-lead per frame, harmonic onset peak times in seconds, seconds per frame).
+
+    HPSS splits the song into harmonic (vocals, sustained instruments) and percussive parts; lead is the
+    one-bar-smoothed ratio of harmonic to percussive onset strength, so >1 means the melody is driving.
+    Needs librosa (ML extra)."""
+    import librosa  # ponytail: only vocal_snap needs it; keep the core import-free
+
+    harm, perc = librosa.effects.hpss(audio)
+    oh = librosa.onset.onset_strength(y=harm, sr=sr, hop_length=hop)
+    op = librosa.onset.onset_strength(y=perc, sr=sr, hop_length=hop)
+    hop_s = hop / sr
+    win = max(int(round(2.0 / hop_s)), 1)  # ~2 s, about a bar at 120 BPM
+    k = np.ones(win) / win
+    lead = np.convolve(oh, k, "same") / (np.convolve(op, k, "same") + 1e-6)
+    peaks = librosa.util.peak_pick(oh, pre_max=3, post_max=3, pre_avg=10, post_avg=10, delta=0.3 * (oh.std() or 1.0), wait=4)
+    return lead, np.asarray(peaks, dtype=np.float64) * hop_s, hop_s
+
+
+def vocal_snap(notes: list[Note], bpm: float, lead: np.ndarray, peak_times: np.ndarray, hop_s: float,
+               min_lead: float = 1.5, tol_beats: float = 0.25) -> list[Note]:
+    """Move hits in vocal-led stretches (``lead`` >= ``min_lead``) onto the nearest harmonic onset.
+
+    bsmg: vocal rhythms rarely sit on the drum grid; map what the voice does. The onset time is re-quantised
+    to whichever of the 1/8 or 1/12 grids is nearer so triplet phrasing survives. A hit moves at most
+    ``tol_beats`` and never onto a time another hit already holds.
+    """
+    if len(peak_times) == 0:
+        return _sorted(notes)
+    beat = 60.0 / bpm
+    hits = _hits(notes)
+    taken = {round(h[0].time_seconds, 3) for h in hits}
+    out: list[Note] = []
+    for h in hits:
+        t = h[0].time_seconds
+        f = min(int(t / hop_s), len(lead) - 1)
+        pt = float(peak_times[np.argmin(np.abs(peak_times - t))])
+        if lead[f] < min_lead or abs(pt - t) > tol_beats * beat:
+            out.extend(h)
+            continue
+        b = pt / beat
+        nb = min((round(b * 8) / 8, round(b * 12) / 12), key=lambda q: abs(q - b))
+        nt = nb * beat
+        if round(nt, 3) in taken and round(nt, 3) != round(t, 3):
+            out.extend(h)
+            continue
+        taken.discard(round(t, 3))
+        taken.add(round(nt, 3))
+        out.extend(replace(n, beat=nb, time_seconds=nt) for n in h)
+    return _sorted(out)
+
+
+# --- 5. bombs and walls (backlog 12) ------------------------------------------------------------------------
+# ponytail: rules at export, as v2 dicts. The model still emits colour notes only; arcs and chains are v3 and the
+# exporter writes v2, so they stay out until the tokenizer learns them.
+def bombs_and_walls(notes: list[Note], bpm: float, bombs: bool = True, walls: bool = True,
+                    rest_beats: float = 2.0, wall_rest_beats: float = 4.0) -> tuple[list[dict], list[dict]]:
+    """(v2 bomb notes, v2 obstacles) for ``notes``.
+
+    Bomb resets (bsmg Intermediate: Bombs): when a hand rests >= ``rest_beats`` and comes back with the same
+    cut it left on, a bomb at 2/3 of the gap sits where the saber must not be (low for a coming down-cut,
+    high for an up-cut), so the player resets instead of double-directional-ing. Kept >= 1/4 beat from any note.
+    Crouch walls (bsmg Basic: Walls): one full-width crouch wall in every rest of >= ``wall_rest_beats``.
+    """
+    beat = 60.0 / bpm
+    ns = _sorted(notes)
+    times = np.array([n.time_seconds for n in ns]) if ns else np.zeros(0)
+    out_b: list[dict] = []
+    if bombs:
+        for color in (0, 1):
+            h = [n for n in ns if n.color == color]
+            for a, b in zip(h, h[1:]):
+                gap = b.time_seconds - a.time_seconds
+                if gap < rest_beats * beat or a.cut_direction != b.cut_direction or b.cut_direction not in (0, 1):
+                    continue
+                t = a.time_seconds + gap * 2 / 3
+                if np.any(np.abs(times - t) < 0.25 * beat):
+                    continue
+                out_b.append({"_time": round(t / beat, 4), "_lineIndex": b.x, "_lineLayer": 0 if b.cut_direction == 1 else 2,
+                              "_type": 3, "_cutDirection": 8})
+    out_w: list[dict] = []
+    if walls:
+        hits = _hits(ns)
+        for p, q in zip(hits, hits[1:]):
+            gap = q[0].time_seconds - p[0].time_seconds
+            if gap >= wall_rest_beats * beat:
+                start = p[0].time_seconds / beat + 1.0
+                out_w.append({"_time": round(start, 4), "_lineIndex": 0, "_type": 1, "_width": 4,
+                              "_duration": round(gap / beat - 2.0, 4)})
+        out_w += _lane_walls(ns, out_w)
+    return out_b, out_w
+
+
+def _lane_walls(ns: list[Note], taken: list[dict], every: float = 4.0, dur: float = 2.0) -> list[dict]:
+    """Dodge walls in whichever half of the grid (lanes 0-1 or 2-3) has no note for the wall's span plus a half beat
+    either side, else 1-wide in an empty outer lane; at most one per ``every`` beats, none overlapping ``taken``."""
+    out: list[dict] = []
+    t = ns[0].beat if ns else 0.0
+    end = ns[-1].beat if ns else 0.0
+    while t + dur <= end:
+        if not any(w["_time"] < t + dur + 0.5 and t < w["_time"] + w["_duration"] + 0.5 for w in taken):
+            span = [n for n in ns if t - 0.5 <= n.beat < t + dur + 0.5]
+            lanes = {n.x for n in span}
+            busy = {x // 2 for x in lanes}
+            free = [h for h in (0, 1) if h not in busy]
+            outer = [x for x in (0, 3) if x not in lanes]
+            # a note beside the candidate wall cutting toward it: that side is out too
+            if any(n.x == 2 and n.cut_direction in (2, 4, 6) for n in span): free = [h for h in free if h != 0]; outer = [x for x in outer if x != 0] if 1 in lanes else outer
+            if any(n.x == 1 and n.cut_direction in (3, 5, 7) for n in span): free = [h for h in free if h != 1]; outer = [x for x in outer if x != 3] if 2 in lanes else outer
+            if any(n.x == 1 and n.cut_direction in (2, 4, 6) for n in span): outer = [x for x in outer if x != 0]
+            if any(n.x == 2 and n.cut_direction in (3, 5, 7) for n in span): outer = [x for x in outer if x != 3]
+            if free and len(busy) == 1:  # a half is free and notes still need the other, so the wall forces a lean
+                out.append({"_time": round(t, 4), "_lineIndex": 2 * free[0], "_type": 0, "_width": 2, "_duration": dur})
+            elif lanes and outer:  # else a 1-wide wall in an empty outer lane: a lighter lean
+                out.append({"_time": round(t, 4), "_lineIndex": outer[0], "_type": 0, "_width": 1, "_duration": dur})
+            if free and len(busy) == 1 or lanes and outer:
+                t += every
+                continue
+        t += 0.5
+    return out
+
+
+def limit_extras(bombs: list[dict], walls: list[dict], notes: list[Note], bpm: float,
+                 walls_per_bar: float = 0.5, min_wall_beats: float = 1.0) -> tuple[list[dict], list[dict]]:
+    """Filter model-made v2 bombs and walls down to what the bsmg guidelines allow.
+
+    Walls: drop any shorter than ``min_wall_beats`` (the model's half-beat side flickers), any full-height wall
+    3+ lanes wide (bsmg: never 3-wide, never the whole grid), and any with a note in its lanes while active
+    or in the half beat after (any row: a note under a crouch wall is hidden while ducking). The rest are capped at ``walls_per_bar``
+    per 4 beats, longest first, by keeping wall starts at least ``4 / walls_per_bar`` beats apart. Bombs: one in a note's saber path (``_in_saber_path``) or on a hand's route between two notes
+    (``_on_swing_route``) moves to the nearest clear cell at the same beat, or is dropped.
+    """
+    ns = _sorted(notes)
+
+    def covers(w: dict, n: Note) -> bool:
+        # any row: a note under a crouch wall's lane is hidden while ducking (played: "notes under a wall, hard to hit");
+        # a half beat either side is reserved for moving the saber out / standing back up. A note in the lane next
+        # to an active wall whose cut swings toward the wall (played: "blocks on the other side of walls") also goes.
+        lo, hi = w["_lineIndex"], w["_lineIndex"] + w["_width"]
+        active = w["_time"] - 0.5 <= n.beat < w["_time"] + w["_duration"] + 0.5
+        into = (n.x == lo - 1 and n.cut_direction in (3, 5, 7)) or (n.x == hi and n.cut_direction in (2, 4, 6))
+        return active and (lo <= n.x < hi or (into and w["_time"] <= n.beat < w["_time"] + w["_duration"]))
+
+    keep = [w for w in walls if w["_duration"] >= min_wall_beats and not (w["_type"] == 0 and w["_width"] >= 3)
+            and not any(covers(w, n) for n in ns)]
+    # longest first, each kept wall starts at least 4 / walls_per_bar beats from every other, so no section bunches
+    gap = 4 / walls_per_bar if walls_per_bar > 0 else float("inf")
+    spaced: list[dict] = []
+    for w in sorted(keep, key=lambda w: -w["_duration"]) if walls_per_bar > 0 else []:
+        if all(abs(w["_time"] - k["_time"]) >= gap for k in spaced):
+            spaced.append(w)
+    keep = sorted(spaced, key=lambda w: w["_time"])
+    out_b: list[dict] = []
+    at = collections.Counter(b["_time"] for b in bombs)
+    for b in bombs:  # keep the model's timing; move a lone bomb in a saber path to the nearest clear cell
+        near = [n for n in ns if abs(n.beat - b["_time"]) <= 0.5]
+        if at[b["_time"]] > 1:  # part of a row/frame: moving one cell breaks the shape, so drop just that cell.
+            # A quarter-beat window: a 3-4 cell row almost always touches some note within half a beat, and only
+            # 4% of real Expert bombs are that close (16% at half a beat)
+            if not any(_in_saber_path(b, n, 0.25) for n in near) and not _on_swing_route(b, ns):
+                out_b.append(b)
+            continue
+        cells = sorted(((x, y) for x in range(4) for y in range(3)),
+                       key=lambda c: abs(c[0] - b["_lineIndex"]) + abs(c[1] - b["_lineLayer"]))
+        for x, y in cells:
+            m = {**b, "_lineIndex": x, "_lineLayer": y}
+            if not any(_in_saber_path(m, n) for n in near) and not _on_swing_route(m, ns) and not any(
+                    o["_lineIndex"] == x and o["_lineLayer"] == y and abs(o["_time"] - b["_time"]) < 0.5 for o in out_b):
+                out_b.append(m)
+                break
+    return out_b, keep
+
+
+def _in_saber_path(b: dict, n: Note, window: float = 0.5) -> bool:
+    """A bomb blocks a note's swing if it is in the note's column within 1/4 beat, or in a neighbouring cell
+    (including diagonals) within half a beat: the saber passes through or next to it on the way in or out
+    (played: a bomb beside a note, then the two swapped one hit later). 1 beat flagged 35% of real Expert bombs."""
+    dt = abs(n.beat - b["_time"])
+    near = abs(n.x - b["_lineIndex"]) <= 1 and abs(n.y - b["_lineLayer"]) <= 1
+    return (n.x == b["_lineIndex"] and dt < 0.25) or (near and dt <= window)
+
+
+_CUT_STEP = {0: (0, 1), 1: (0, -1), 2: (-1, 0), 3: (1, 0), 4: (-1, 1), 5: (1, 1), 6: (-1, -1), 7: (1, -1), 8: (0, 0)}
+
+
+def _on_swing_route(b: dict, ns: list[Note], max_gap: float = 2.0, reach: float = 0.75) -> bool:
+    """A bomb sits on a hand's route between the note before it and the note after it (both within
+    ``max_gap`` beats of the bomb): the follow-through cell one step past the first cut, the wind-up cell one
+    step before the second, and the straight lines joining them. Played: bombs in the saber's path between
+    notes, which the half-beat ``_in_saber_path`` window missed (3-7 per map, gaps up to 2 beats)."""
+    c = (b["_lineIndex"], b["_lineLayer"])
+    for hand in (0, 1):
+        before = [n for n in ns if n.color == hand and b["_time"] - max_gap <= n.beat <= b["_time"]]
+        after = [n for n in ns if n.color == hand and b["_time"] < n.beat <= b["_time"] + max_gap]
+        if not before or not after:
+            continue
+        p, q = before[-1], after[0]
+        (dpx, dpy), (dqx, dqy) = _CUT_STEP.get(p.cut_direction, (0, 0)), _CUT_STEP.get(q.cut_direction, (0, 0))
+        route = [(p.x, p.y), (p.x + dpx, p.y + dpy), (q.x - dqx, q.y - dqy), (q.x, q.y)]
+        if min(_seg_dist(c, a, z) for a, z in zip(route, route[1:])) < reach:
+            return True
+    return False
+
+
+def _seg_dist(c: tuple, a: tuple, z: tuple) -> float:
+    vx, vy = z[0] - a[0], z[1] - a[1]
+    t = 0.0 if vx == vy == 0 else max(0.0, min(1.0, ((c[0] - a[0]) * vx + (c[1] - a[1]) * vy) / (vx * vx + vy * vy)))
+    return math.hypot(c[0] - a[0] - t * vx, c[1] - a[1] - t * vy)
+
+
+def drop_overlapping_walls(walls: list[dict]) -> list[dict]:
+    """Drop walls that share a lane with a longer wall while active, or start within a half beat of its end
+    (played: walls inside other walls). Rule and model walls are merged before this, so it catches both."""
+    kept: list[dict] = []
+    for w in sorted(walls, key=lambda w: -w["_duration"]):
+        if not any(w["_lineIndex"] < k["_lineIndex"] + k["_width"] and k["_lineIndex"] < w["_lineIndex"] + w["_width"]
+                   and w["_time"] < k["_time"] + k["_duration"] + 0.5 and k["_time"] < w["_time"] + w["_duration"] + 0.5
+                   for k in kept):
+            kept.append(w)
+    return sorted(kept, key=lambda w: w["_time"])
 
 
 if __name__ == "__main__":  # self-check

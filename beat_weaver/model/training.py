@@ -19,6 +19,7 @@ from beat_weaver.model.dataset import BeatSaberDataset, build_weighted_sampler, 
 from beat_weaver.model.tokenizer import (
     LEFT_EMPTY, RIGHT_EMPTY,
     BAR_BASE,
+    BOMB_BASE,
     BAR_COUNT,
     LEFT_BASE,
     LEFT_COUNT,
@@ -81,11 +82,41 @@ def note_frame_targets(tokens: torch.Tensor, n_frames: int) -> torch.Tensor:
     return targets
 
 
+def _is_extras_target(flat: torch.Tensor, placement_only: bool) -> torch.Tensor:
+    """BOMB/WALL targets, plus (in placement mode) the POS that opens an extras-only position."""
+    extra = flat >= BOMB_BASE
+    if placement_only:
+        extra = extra | ((flat >= POS_BASE) & (flat < POS_BASE + POS_COUNT))
+    return extra
+
+
+def token_loss(logits: torch.Tensor, targets: torch.Tensor, label_smoothing: float,
+               extras_weight: float = 1.0, placement_only: bool = False) -> torch.Tensor:
+    """Mean cross-entropy over non-PAD targets, with extras targets weighted by ``extras_weight``.
+
+    At 1.0 this is nn.CrossEntropyLoss(ignore_index=PAD, label_smoothing). Below 1.0 the bomb/wall targets pull
+    less on the shared decoder: the extras4 fine-tune (weight 1) learned bombs but drifted the notes (doubles
+    26-52% -> 5-13%, big fast reversals 11% -> 19% at equal decode flags)."""
+    flat = targets.reshape(-1)
+    per = F.cross_entropy(logits.reshape(-1, logits.size(-1)).float(), flat, ignore_index=PAD, reduction="none",
+                          label_smoothing=label_smoothing)
+    w = (flat != PAD).float()
+    if extras_weight != 1.0:
+        w = torch.where(_is_extras_target(flat, placement_only), w * extras_weight, w)
+    return (per * w).sum() / w.sum().clamp(min=1)
+
+
 def placement_targets(targets: torch.Tensor) -> torch.Tensor:
-    """Targets with everything but LEFT/RIGHT tokens set to PAD (ignored)."""
-    keep = (targets == LEFT_EMPTY) | (targets == RIGHT_EMPTY) | (
+    """Targets with everything but LEFT/RIGHT (and BOMB/WALL) tokens set to PAD (ignored).
+
+    Also kept: a POS that opens a bomb/wall-only position (followed by LEFT_EMPTY, RIGHT_EMPTY). Notes get their
+    timing from the onset head, but nothing schedules these, so the decoder has to learn where they go."""
+    pos = (targets >= POS_BASE) & (targets < POS_BASE + POS_COUNT)
+    nxt = torch.zeros_like(pos)
+    nxt[:, :-2] = (targets[:, 1:-1] == LEFT_EMPTY) & (targets[:, 2:] == RIGHT_EMPTY)
+    keep = (pos & nxt) | (targets == LEFT_EMPTY) | (targets == RIGHT_EMPTY) | (
         (targets >= LEFT_BASE) & (targets < LEFT_BASE + LEFT_COUNT)
-    ) | ((targets >= RIGHT_BASE) & (targets < RIGHT_BASE + RIGHT_COUNT))
+    ) | ((targets >= RIGHT_BASE) & (targets < RIGHT_BASE + RIGHT_COUNT)) | (targets >= BOMB_BASE)
     return torch.where(keep, targets, torch.full_like(targets, PAD))
 
 
@@ -189,10 +220,8 @@ class Trainer:
                 )
                 # logits: (batch, seq_len-1, vocab_size)
                 # target: (batch, seq_len-1)
-                loss = self.criterion(
-                    logits.reshape(-1, logits.size(-1)),
-                    target_tokens.reshape(-1),
-                )
+                loss = token_loss(logits, target_tokens, self.config.label_smoothing,
+                                  self.config.extras_loss_weight, self.config.placement_only)
                 # Onset-alignment auxiliary loss on the encoder output
                 if self.config.onset_loss_weight > 0:
                     onset_loss = F.binary_cross_entropy_with_logits(
@@ -242,6 +271,8 @@ class Trainer:
         total_correct = 0
         total_tokens = 0
         n_batches = 0
+        note_sum = extra_sum = 0.0  # unweighted CE split: notes (LEFT/RIGHT incl. empties) vs extras, to see drift
+        note_n = extra_n = 0
 
         for mel, mel_mask, tokens, token_mask in dataloader:
             mel = mel.to(self.device)
@@ -263,6 +294,13 @@ class Trainer:
             )
             total_loss += loss.item()
             n_batches += 1
+            flat_t = target_tokens.reshape(-1)
+            per = F.cross_entropy(logits.reshape(-1, logits.size(-1)).float(), flat_t, ignore_index=PAD,
+                                  reduction="none", label_smoothing=self.config.label_smoothing)
+            is_note = (flat_t >= LEFT_EMPTY) & (flat_t < RIGHT_BASE + RIGHT_COUNT)
+            is_extra = _is_extras_target(flat_t, self.config.placement_only)
+            note_sum += per[is_note].sum().item(); note_n += int(is_note.sum())
+            extra_sum += per[is_extra].sum().item(); extra_n += int(is_extra.sum())
 
             # Token accuracy (ignoring padding)
             preds = logits.argmax(dim=-1)
@@ -272,7 +310,8 @@ class Trainer:
 
         avg_loss = total_loss / max(1, n_batches)
         accuracy = total_correct / max(1, total_tokens)
-        return {"val_loss": avg_loss, "val_token_accuracy": accuracy}
+        return {"val_loss": avg_loss, "val_token_accuracy": accuracy,
+                "val_note_loss": note_sum / max(1, note_n), "val_extras_loss": extra_sum / max(1, extra_n)}
 
     def save_checkpoint(self, name: str) -> Path:
         """Save model + optimizer + scheduler + training state."""
@@ -353,8 +392,12 @@ def train(
     output_dir: Path,
     resume_from: Path | None = None,
     init_from: Path | None = None,
+    probe_audio: Path | None = None,
 ) -> Path:
     """Main training entry point.
+
+    ``probe_audio`` generates that song after every epoch with ``probe.PROBE_FLAGS`` and logs the doubles,
+    reversal, left-hand and nps shares (``probe.drift_stats``): the drift that validation loss cannot see.
 
     ``init_from`` loads only the weights of a checkpoint (fresh optimizer,
     schedule and best-loss), for fine-tuning under a different objective.
@@ -373,9 +416,16 @@ def train(
         trainer.load_checkpoint(resume_from)
         logger.info("Resumed from %s (epoch %d)", resume_from, trainer.epoch)
     elif init_from:
-        model.load_state_dict(
-            torch.load(Path(init_from) / "model.pt", map_location=trainer.device, weights_only=True),
-        )
+        state = torch.load(Path(init_from) / "model.pt", map_location=trainer.device, weights_only=True)
+        # A notes-only checkpoint (vocab 355) warm-starts the 495 vocab: copy the old rows, new rows stay random
+        own = model.state_dict()
+        for k in ("decoder.embedding.weight", "decoder.output_proj.weight", "decoder.output_proj.bias"):
+            if k in state and state[k].shape != own[k].shape:
+                grown = own[k].clone()
+                grown[: state[k].shape[0]] = state[k]
+                logger.info("Grew %s from %s to %s", k, tuple(state[k].shape), tuple(own[k].shape))
+                state[k] = grown
+        model.load_state_dict(state)
         logger.info("Initialised weights from %s", init_from)
 
     sampler = build_weighted_sampler(
@@ -424,6 +474,12 @@ def train(
         len(train_dataset), len(val_dataset), len(train_loader), trainer.device,
     )
 
+    probe_mel = probe_bpm = None
+    if probe_audio is not None:
+        from beat_weaver.model.probe import load_probe_audio
+        probe_mel, probe_bpm = load_probe_audio(probe_audio, config)
+        logger.info("Drift probe: %s at %.1f BPM after every epoch", probe_audio, probe_bpm)
+
     for epoch in range(trainer.epoch, config.max_epochs):
         trainer.epoch = epoch
         t0 = time.time()
@@ -436,17 +492,30 @@ def train(
         total_elapsed = time.time() - training_start
 
         logger.info(
-            "Epoch %d/%d (%.1fs, total %.0fs): train_loss=%.4f val_loss=%.4f val_acc=%.4f",
+            "Epoch %d/%d (%.1fs, total %.0fs): train_loss=%.4f val_loss=%.4f val_acc=%.4f "
+            "val_note_loss=%.4f val_extras_loss=%.4f",
             epoch + 1, config.max_epochs, elapsed, total_elapsed,
             train_loss, val_metrics["val_loss"], val_metrics["val_token_accuracy"],
+            val_metrics["val_note_loss"], val_metrics["val_extras_loss"],
         )
 
         # TensorBoard
         trainer.writer.add_scalar("train/loss_epoch", train_loss, epoch)
         trainer.writer.add_scalar("val/loss", val_metrics["val_loss"], epoch)
         trainer.writer.add_scalar("val/token_accuracy", val_metrics["val_token_accuracy"], epoch)
+        trainer.writer.add_scalar("val/note_loss", val_metrics["val_note_loss"], epoch)
+        trainer.writer.add_scalar("val/extras_loss", val_metrics["val_extras_loss"], epoch)
         trainer.writer.add_scalar("timing/epoch_seconds", elapsed, epoch)
         trainer.writer.add_scalar("timing/total_seconds", total_elapsed, epoch)
+
+        if probe_mel is not None:
+            from beat_weaver.model.probe import probe
+            stats = probe(model, config, probe_mel, probe_bpm)
+            if stats:
+                logger.info("Probe epoch %d: nps=%.2f doubles=%.3f reversal=%.3f left=%.3f",
+                            epoch + 1, stats["nps"], stats["doubles"], stats["reversal"], stats["left"])
+                for k, v in stats.items():
+                    trainer.writer.add_scalar(f"probe/{k}", v, epoch)
 
         # Checkpoint every epoch
         trainer.save_checkpoint(f"epoch_{epoch + 1:03d}")

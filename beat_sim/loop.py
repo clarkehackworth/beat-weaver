@@ -1,6 +1,6 @@
 """Generate-and-score loop: run a grid of generation settings on the container, score each map here, rank.
 
-    python -m beat_sim.loop --tag r1 --songs lying sawadika \\
+    python -m beat_sim.loop --tag r1 --songs song1 song2 \\
         --grid "notes-per-beat=1.0,1.5,2.0" "min-gap=0.1,0.15" --extra="--two-stage --temperature 0.9"
 
 Each grid cell is one `beat-weaver generate` call per song inside the beat-weaver container on $BW_HOST,
@@ -118,7 +118,7 @@ def score_folder(folder: str, name: str, cell: str, song: str, seed: int, diffic
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--tag", required=True, help="run name; folder under /data/generate and ~/Downloads")
-    ap.add_argument("--songs", nargs="+", default=["lying", "sawadika"], help="names of /data/generate/<song>.mp3")
+    ap.add_argument("--songs", nargs="+", required=True, help="names of /data/generate/<song>.mp3")
     ap.add_argument("--grid", nargs="*", default=[], help='axes like "notes-per-beat=1.0,1.5"')
     ap.add_argument("--extra", default="--two-stage", help="flags added to every generate call")
     ap.add_argument("--checkpoint", default=CHECKPOINT)

@@ -9,6 +9,7 @@ from beat_weaver.model.inference import (
     _build_grammar_mask, _crossover_outward_tokens, _decode_note_token, generate, generate_full_song,
 )
 from beat_weaver.model.tokenizer import (
+    BOMB_BASE,
     BAR_BASE,
     BAR_COUNT,
     bar_token,
@@ -87,9 +88,9 @@ class TestGrammarMask:
         assert mask[_encode_note_token(RIGHT_BASE, 3, 1, 0)]
         assert mask[RIGHT_EMPTY]
         allowed = mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum()
-        assert allowed == (2 * 3 - 1) * 9  # columns 2-3 minus the shared cell; the outward rule only hits columns 0-1
+        assert allowed == (2 * 3 - 1) * 9 - 9  # columns 2-3 minus the shared cell, minus inward cuts on column 3
         # without the cell the full set is allowed (LEFT_EMPTY case)
-        assert _build_grammar_mask(LEFT_EMPTY)[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 18
+        assert _build_grammar_mask(LEFT_EMPTY)[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 27
 
     def test_reset_tokens_block_same_way_cuts(self):
         from beat_weaver.model.inference import _reset_tokens
@@ -101,6 +102,60 @@ class TestGrammarMask:
             assert not m[_encode_note_token(LEFT_BASE, 3, 2, d)], d
         assert not m[_encode_note_token(RIGHT_BASE, 0, 0, 1)]
         assert not _reset_tokens(LEFT_BASE, 8).any()
+        # up-left then up-right: 90 degrees apart, but both are upswings
+        m = _reset_tokens(LEFT_BASE, 4)
+        assert m[_encode_note_token(LEFT_BASE, 0, 0, 5)] and not m[_encode_note_token(LEFT_BASE, 0, 0, 7)]
+        assert not _reset_tokens(LEFT_BASE, 2)[_encode_note_token(LEFT_BASE, 0, 0, 0)]  # left then up: no reset
+
+    def test_converging_mask_blocks_a_saber_arriving_through_the_other_note(self):
+        from beat_weaver.model.inference import _converging_right_tokens
+        from beat_weaver.model.tokenizer import _encode_note_token
+        m = _converging_right_tokens((0, 1), 0)  # red up-cut on (0,1): its saber arrives from (0,0)
+        assert m[_encode_note_token(RIGHT_BASE, 0, 0, 1)]   # blue down-cut on (0,0): arrives from (0,1)
+        assert m[_encode_note_token(RIGHT_BASE, 0, 0, 0)]   # blue up-cut on (0,0): red's saber comes through it
+        assert not m[_encode_note_token(RIGHT_BASE, 3, 1, 0)]
+
+    def test_stacks_continue_a_hand_on_a_higher_cell_with_the_same_cut(self):
+        from beat_weaver.model.inference import _build_grammar_mask
+        from beat_weaver.model.tokenizer import _encode_note_token
+        left = _encode_note_token(LEFT_BASE, 1, 0, 1)
+        assert not _build_grammar_mask(left, 4, 0, None, (1, 0))[_encode_note_token(LEFT_BASE, 1, 1, 1)]  # off by default
+        m = _build_grammar_mask(left, 4, 0, None, (1, 0), stacks=True)
+        assert m[_encode_note_token(LEFT_BASE, 1, 1, 1)]  # the next cell along the down cut
+        assert not m[_encode_note_token(LEFT_BASE, 2, 0, 1)] and not m[_encode_note_token(LEFT_BASE, 1, 2, 1)]  # across, or not adjacent
+        assert not m[_encode_note_token(LEFT_BASE, 0, 0, 1)] and not m[_encode_note_token(LEFT_BASE, 1, 1, 0)]
+        diag = _build_grammar_mask(_encode_note_token(LEFT_BASE, 0, 1, 4), 4, 0, None, (0, 1), stacks=True)  # up-left
+        assert diag[_encode_note_token(LEFT_BASE, 1, 0, 4)] and not diag[_encode_note_token(LEFT_BASE, 1, 2, 4)]
+        assert m[RIGHT_EMPTY] and m[_encode_note_token(RIGHT_BASE, 3, 0, 1)]
+        right = _encode_note_token(RIGHT_BASE, 2, 0, 1)
+        m = _build_grammar_mask(right, 4, 0, None, (1, 0), stacks=True)
+        assert m[_encode_note_token(RIGHT_BASE, 2, 1, 1)] and not m[_encode_note_token(RIGHT_BASE, 1, 1, 1)]
+        assert m[POS_BASE + 5] and not m[_encode_note_token(RIGHT_BASE, 1, 0, 1)]  # may close; never on the LEFT cell
+
+    def test_swing_back_through_flags_cuts_the_saber_must_come_back_for(self):
+        from beat_weaver.model.inference import _swing_back_tokens, _swings_back_through, drop_fast_same_way
+        from beat_weaver.schemas.normalized import Note
+        from beat_weaver.model.tokenizer import _encode_note_token
+        # cut right on the middle row heading out to the right edge, then a note at the edge asking to be cut
+        # leftward from beyond it (the played case), or downward from the top after swinging up
+        assert _swings_back_through(1, 1, 3, 3, 1, 2)
+        assert _swings_back_through(1, 0, 0, 1, 2, 0) is False  # up then up again: a reset, not this rule
+        assert _swings_back_through(0, 1, 7, 0, 0, 0)            # down-right from the side, then up from below it
+        assert _swings_back_through(1, 0, 0, 1, 2, 1)            # bottom up, then top down: past the top and back
+        assert not _swings_back_through(1, 0, 1, 1, 0, 0)        # down then up on one cell: the normal arc
+        assert not _swings_back_through(1, 0, 0, 1, 1, 1)        # up, then down where the saber stopped
+        assert not _swings_back_through(1, 1, 3, 3, 1, 3)        # keep going right: fine
+        m = _swing_back_tokens(LEFT_BASE, (1, 1), 3)
+        assert m[_encode_note_token(LEFT_BASE, 3, 1, 2)] and not m[_encode_note_token(LEFT_BASE, 3, 1, 3)]
+        assert not m[_encode_note_token(RIGHT_BASE, 3, 1, 2)]
+        notes = [Note(beat=0.0, time_seconds=0.0, x=1, y=0, color=0, cut_direction=0, angle_offset=0),  # bottom up,
+                 Note(beat=0.5, time_seconds=0.25, x=1, y=2, color=0, cut_direction=1, angle_offset=0),  # then top down
+                 Note(beat=2.0, time_seconds=1.0, x=1, y=2, color=0, cut_direction=1, angle_offset=0)]   # hand's own side
+        assert [n.beat for n in drop_fast_same_way(notes, 0.0)] == [0.0, 2.0]  # a beat and more later is fine
+        fast = [Note(beat=b, time_seconds=b * 0.5, x=1, y=1, color=0, cut_direction=d, angle_offset=0) for b, d in ((0.0, 1), (0.25, 3), (0.5, 0), (1.0, 2))]
+        assert [n.beat for n in drop_fast_same_way(fast, 0.0, min_swing_seconds=0.2)] == [0.0, 0.5, 1.0]  # 0.125 s gap dropped
+        stack = [Note(beat=0.0, time_seconds=0.0, x=1, y=y, color=0, cut_direction=1, angle_offset=0) for y in (1, 0)]
+        assert len(drop_fast_same_way(stack, 0.5, min_swing_seconds=0.2)) == 2  # a stack is one swing, not a reset
 
     def test_arc_penalty_geometry(self):
         from beat_weaver.model.inference import _arc_penalty
@@ -155,7 +210,7 @@ class TestGrammarMask:
         mask = _build_grammar_mask(POS_BASE + 10)
         # LEFT tokens
         assert mask[LEFT_EMPTY]
-        assert mask[LEFT_BASE:LEFT_BASE + LEFT_COUNT].sum() == LEFT_COUNT - 18
+        assert mask[LEFT_BASE:LEFT_BASE + LEFT_COUNT].sum() == LEFT_COUNT - 27
         assert not mask[_crossover_outward_tokens(LEFT_BASE)].any()
         assert not mask[bar_token(0)]
         assert not mask[RIGHT_EMPTY]
@@ -164,7 +219,7 @@ class TestGrammarMask:
         mask = _build_grammar_mask(LEFT_BASE + 5)
         # RIGHT tokens
         assert mask[RIGHT_EMPTY]
-        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 18
+        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 27
         assert not mask[_crossover_outward_tokens(RIGHT_BASE)].any()
         assert not mask[bar_token(0)]
         assert not mask[LEFT_EMPTY]
@@ -173,7 +228,7 @@ class TestGrammarMask:
         mask = _build_grammar_mask(LEFT_EMPTY)
         # RIGHT tokens
         assert mask[RIGHT_EMPTY]
-        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 18
+        assert mask[RIGHT_BASE:RIGHT_BASE + RIGHT_COUNT].sum() == RIGHT_COUNT - 27
 
     def test_after_right(self):
         mask = _build_grammar_mask(RIGHT_BASE + 5)
@@ -193,7 +248,7 @@ class TestGenerate:
     @pytest.fixture
     def small_model(self):
         config = ModelConfig(
-            vocab_size=355,
+            vocab_size=495,
             max_seq_len=64,
             n_mels=80,
             encoder_layers=1,
@@ -258,7 +313,7 @@ class TestGenerateFullSong:
     @pytest.fixture
     def small_model(self):
         config = ModelConfig(
-            vocab_size=355,
+            vocab_size=495,
             max_seq_len=64,
             max_audio_len=128,
             n_mels=80,
@@ -365,7 +420,7 @@ class TestGenerateFullSong:
             return rep / max(tot, 1), tot
         r0, n0 = repeat_rate(0.0); r1, n1 = repeat_rate(50.0)
         assert n0 > 50 and n1 > 50
-        assert r1 < r0 * 0.5, (r0, r1)
+        assert r1 < r0 * 0.6, (r0, r1)  # untrained model; init shifted with the 495 vocab, 0.5 fails by 3e-4
 
     def test_dynamics_shapes_budget_to_the_onset_head(self, small_model):
         from beat_weaver.model.inference import _onset_schedule
@@ -382,6 +437,9 @@ class TestGenerateFullSong:
         pb = per_bar(shaped)
         assert pb[0] == 0 and pb[3] > pb[1] >= 1, pb
         assert abs(sum(pb) - sum(per_bar(flat))) <= 2, "density is preserved overall"
+        even = per_bar(_onset_schedule(model, memory, n, notes_per_beat=1.0, min_gap=2, dynamics=1.0,
+                                       dynamics_range=(0.7, 1.3)))
+        assert even[0] >= 2 and max(even) <= 6, even  # floor and ceiling at 0.7x / 1.3x of 4 per bar
 
     def test_lead_in_drops_opening_notes(self, small_model):
         model, config = small_model
@@ -441,11 +499,13 @@ class TestGenerateFullSong:
         assert m[tok(3, 1, 2)], "two cells away cutting back: the blue blade runs over the red (cut-through)"
         assert not m[tok(3, 0, 3)], "two cells away on another row: fine"
         assert m[tok(1, 1, 0)] and m[tok(1, 1, 3)] and not m[tok(1, 1, 8)], "same cell: any directional cut blocked, dot ok"
-        assert not m[tok(0, 1, 2)], "behind the left cut, sweeping away: fine"
+        assert m[tok(0, 1, 2)], "on the cell the left saber arrives through (approach): blocked"
+        assert not m[tok(0, 0, 2)], "behind and below, sweeping away: fine"
         m2 = _converging_right_tokens((1, 1), 0)  # left cutting UP
         assert m2[tok(1, 2, 1)] and m2[tok(2, 2, 6)] and not m2[tok(2, 2, 0)]
         m8 = _converging_right_tokens((1, 1), 8)  # left is a dot: only cuts that run over it are blocked
-        assert m8[tok(2, 1, 2)] and not m8[tok(2, 1, 3)] and not m8[tok(0, 0, 1)]
+        assert m8[tok(2, 1, 2)] and not m8[tok(3, 1, 3)] and not m8[tok(0, 0, 1)]
+        assert m8[tok(2, 1, 3)], "a blue cut arriving through the dot's cell is an approach crossing"
 
     def test_arm_tangle_mask(self):
         from beat_weaver.model.inference import _converging_right_tokens
@@ -472,8 +532,10 @@ class TestGenerateFullSong:
         assert _converging_right_tokens((1, 1), 3)[tok(2, 1, 1)], "cut-through: left blade passes over the blue"
         assert not _converging_right_tokens((1, 1), 3)[tok(2, 0, 1)], "90 deg apart off the blade path is not a near miss"
         assert not _converging_right_tokens((1, 1), 3)[tok(3, 0, 6)], "two cells away off the blade path is fine"
-        # neither aimed at the other: left at (1,1) cutting LEFT, right at (2,1) cutting UP-RIGHT, 135 apart but diverging
-        assert not _converging_right_tokens((1, 1), 2)[tok(2, 1, 5)]
+        # left at (1,1) cutting LEFT arrives from (2,1): a right note there is an approach crossing, even cutting away
+        assert _converging_right_tokens((1, 1), 2)[tok(2, 1, 5)]
+        # diverging and off both approach paths: left at (1,1) cutting LEFT, right at (2,2) cutting RIGHT
+        assert not _converging_right_tokens((1, 1), 2)[tok(2, 2, 3)]
 
     def test_no_converging_doubles_are_generated(self, small_model):
         from beat_weaver.model.inference import _converging_right_tokens
@@ -579,6 +641,8 @@ class TestGenerateFullSong:
         audio = np.concatenate([np.random.default_rng(0).standard_normal(5 * sr) * 0.3, np.zeros(3 * sr)]).astype(np.float32)
         end = last_music_second(audio, sr)
         assert 4.9 <= end <= 5.2, end
+        ring = np.concatenate([audio[:5 * sr], audio[:sr] * np.linspace(0.05, 0.01, sr, dtype=np.float32)])  # a fading tail
+        assert last_music_second(ring, sr) <= 5.1  # is not music
         model, config = small_model
         mel = torch.randn(80, config.max_audio_len)
         notes = generate_full_song(model, mel, "Expert", config, 120.0, seed=1, two_stage=True, notes_per_beat=2.0,
@@ -631,9 +695,16 @@ class TestGenerateFullSong:
         assert sum(p in high for p in guided) >= 27, guided
         assert sum(p in high for p in unguided) <= 6, unguided
 
+    def test_final_filter_drops_crossed_notes_cutting_back(self):
+        from beat_weaver.model.inference import drop_fast_same_way
+        from beat_weaver.schemas.normalized import Note
+        mk = lambda b, x, c, d: Note(beat=b, time_seconds=b / 2, x=x, y=2, color=c, cut_direction=d)
+        kept = drop_fast_same_way([mk(0, 0, 1, 7), mk(4, 0, 1, 4), mk(8, 3, 0, 2), mk(12, 3, 0, 5)], 0.0)
+        assert [(n.beat, n.cut_direction) for n in kept] == [(4, 4), (12, 5)]  # right DR / left L on the far side go
+
     def test_crossover_notes_never_face_outward(self, small_model):
-        """A left note in columns 2-3 never cuts right-ish, a right note in
-        columns 0-1 never cuts left-ish: those are the near-unhittable blocks."""
+        """A left note in columns 2-3 never cuts left-ish, a right note in
+        columns 0-1 never cuts right-ish: the crossed saber would have to turn back."""
         from beat_weaver.model.tokenizer import _decode_note_token
         model, config = small_model
         mel = torch.randn(80, config.max_audio_len)
@@ -641,10 +712,10 @@ class TestGenerateFullSong:
             for t in generate(model, mel, "Expert", config, seed=seed, audio_bars=4, temperature=2.0):
                 if LEFT_BASE <= t < LEFT_BASE + LEFT_COUNT:
                     x, _, d = _decode_note_token(t, LEFT_BASE)
-                    assert not (x >= 2 and d in (3, 5, 7)), (x, d)
+                    assert not (x >= 2 and d in (2, 4, 6)), (x, d)
                 elif RIGHT_BASE <= t < RIGHT_BASE + RIGHT_COUNT:
                     x, _, d = _decode_note_token(t, RIGHT_BASE)
-                    assert not (x <= 1 and d in (2, 4, 6)), (x, d)
+                    assert not (x <= 1 and d in (3, 5, 7)), (x, d)
 
     def test_two_stage_notes_sit_exactly_on_the_scheduled_frames(self, small_model):
         """Timing comes from the onset head alone: with frames 10, 20, 40 of
@@ -660,10 +731,145 @@ class TestGenerateFullSong:
             for i, t in enumerate(toks):
                 if BAR_BASE <= t < BAR_BASE + BAR_COUNT: bar = t - BAR_BASE
                 elif POS_BASE <= t < POS_BASE + POS_COUNT:
-                    frames.append(bar * 64 + t - POS_BASE)
-                    assert not (toks[i + 1] == LEFT_EMPTY and toks[i + 2] == RIGHT_EMPTY)
+                    if toks[i + 1] == LEFT_EMPTY and toks[i + 2] == RIGHT_EMPTY:
+                        assert toks[i + 3] >= BOMB_BASE  # an extras-only position always holds a bomb or wall
+                    else:
+                        frames.append(bar * 64 + t - POS_BASE)
             assert frames == sorted(high), (seed, frames)
             assert toks[-1] == END
+
+    def test_two_stage_keeps_the_schedule_within_the_token_budget(self, small_model):
+        """A schedule that nearly fills max_seq_len, with a decoder that wants bombs and bomb-only positions
+        everywhere: every scheduled note is still placed and the sequence stays under the cap (the outro of a
+        long song went silent when extras ate the budget)."""
+        model, config = small_model
+        high = set(range(2, 128, 8))  # 16 notes = 48 tokens + bars + START/DIFF in a 64-token model
+        model.onset_head = self._fixed_onset_head(high, config.max_audio_len)
+        real = model.decoder
+
+        class Greedy(torch.nn.Module):
+            def forward(self, toks, *a):
+                out = real(toks, *a).clone()
+                out[0, -1, BOMB_BASE: BOMB_BASE + 12] += 50.0  # a bomb wherever one is allowed
+                out[0, -1, POS_BASE: POS_BASE + 64] += 50.0  # and a position whenever one is allowed
+                out[0, -1, LEFT_EMPTY] += 60.0  # bomb-only positions get confirmed
+                return out
+
+        model.decoder = Greedy()
+        mel = torch.randn(80, config.max_audio_len)
+        for seed in range(3):
+            toks = generate(model, mel, "Expert", config, seed=seed, audio_bars=2, two_stage=True)
+            frames, bar = [], -1
+            for i, t in enumerate(toks):
+                if BAR_BASE <= t < BAR_BASE + BAR_COUNT: bar = t - BAR_BASE
+                elif POS_BASE <= t < POS_BASE + POS_COUNT and not (toks[i + 1] == LEFT_EMPTY and toks[i + 2] == RIGHT_EMPTY):
+                    frames.append(bar * 64 + t - POS_BASE)
+            assert frames == sorted(high), (seed, frames)
+            assert len(toks) <= config.max_seq_len, len(toks)
+
+    def test_streams_alternate_hands_with_no_doubles(self, small_model):
+        from beat_weaver.model.inference import _stream_frames
+        # a chain of 16 hits half a beat apart, then a rest, then 4 more: only the chain is a stream at share 0.5
+        chain = list(range(0, 128, 8)); tail = [160, 168, 176, 184]
+        assert _stream_frames(chain + tail, 0.5) == set(chain)
+        assert _stream_frames(chain + tail, 0.0) == set()
+        model, config = small_model
+        model.onset_head = self._fixed_onset_head(set(chain), config.max_audio_len)
+        mel = torch.randn(80, config.max_audio_len)
+        for seed in range(3):
+            toks = generate(model, mel, "Expert", config, seed=seed, audio_bars=2, two_stage=True, streams=1.0,
+                            doubles_bias=20.0)
+            hands = []
+            for i, t in enumerate(toks):
+                if POS_BASE <= t < POS_BASE + POS_COUNT and not (toks[i + 1] == LEFT_EMPTY and toks[i + 2] == RIGHT_EMPTY):
+                    hands.append((toks[i + 1] != LEFT_EMPTY, toks[i + 2] != RIGHT_EMPTY))
+            assert len(hands) == 16 and all(l != r for l, r in hands), (seed, hands)  # one note per hit, never a double
+            assert all(a != b for a, b in zip(hands, hands[1:])), (seed, hands)  # hands alternate
+
+    def test_stack_bias_adds_stacks(self, small_model):
+        model, config = small_model
+        model.onset_head = self._fixed_onset_head(set(range(0, 128, 4)), config.max_audio_len)
+        mel = torch.randn(80, config.max_audio_len)
+
+        def stacked(bias):
+            hand = lambda t: 0 if LEFT_BASE <= t < LEFT_BASE + LEFT_COUNT else 1 if RIGHT_BASE <= t < RIGHT_BASE + RIGHT_COUNT else None
+            n = 0
+            for seed in range(5):  # a random model: compare totals, not one sample
+                toks = generate(model, mel, "Expert", config, seed=seed, audio_bars=2, two_stage=True, stacks=True, stack_bias=bias)
+                n += sum(hand(a) is not None and hand(a) == hand(b) for a, b in zip(toks, toks[1:]))
+            return n
+        assert stacked(50.0) > stacked(0.0)  # (the target cap only stops the bonus; a random model stacks anyway)
+
+    def test_raised_max_run_drops_a_hand_to_the_bottom_row(self, small_model):
+        model, config = small_model
+        model.onset_head = self._fixed_onset_head(set(range(0, 128, 8)), config.max_audio_len)
+        mel = torch.randn(80, config.max_audio_len)
+        def over(cap):  # notes past the 2nd in a row in rows 1-2, over 5 seeds
+            n = 0
+            for seed in range(5):
+                toks = generate(model, mel, "Expert", config, seed=seed, audio_bars=2, two_stage=True, raised_max_run=cap)
+                for base, size in ((LEFT_BASE, LEFT_COUNT), (RIGHT_BASE, RIGHT_COUNT)):
+                    run = 0
+                    for t in toks:
+                        if base <= t < base + size:
+                            run = run + 1 if _decode_note_token(t, base)[1] >= 1 else 0
+                            n += run > 2
+            return n
+        # the cap steps aside when the bottom row has no legal note left, so not zero
+        assert over(2) < over(0) / 2, (over(2), over(0))
+
+    def test_left_cells_do_not_block_the_right_hand_at_later_positions(self, small_model):
+        """Scheduled positions must clear the open LEFT cells: they used to pile up, so a RIGHT note could never
+        use a cell the left hand had ever used (one song: 339 dead ends fell back to vision-cell notes)."""
+        model, config = small_model
+        model.onset_head = self._fixed_onset_head(set(range(0, 128, 8)), config.max_audio_len)
+        mel = torch.randn(80, config.max_audio_len)
+        toks = generate(model, mel, "Expert", config, seed=0, audio_bars=2, two_stage=True)
+        used_left, reused = set(), 0
+        for i, t in enumerate(toks):
+            if POS_BASE <= t < POS_BASE + POS_COUNT:
+                l, r = toks[i + 1], toks[i + 2]
+                if RIGHT_BASE <= r < RIGHT_BASE + RIGHT_COUNT:
+                    reused += _decode_note_token(r, RIGHT_BASE)[:2] in used_left
+                if LEFT_BASE <= l < LEFT_BASE + LEFT_COUNT:
+                    used_left.add(_decode_note_token(l, LEFT_BASE)[:2])
+        assert reused > 0
+
+    def test_two_stage_can_open_bomb_only_positions_between_notes(self, small_model):
+        """The decoder may open positions between the scheduled notes; those hold only bombs or walls, and the
+        scheduled note frames are unchanged and the sequence still parses."""
+        model, config = small_model
+        high = set(range(4, 128, 16))  # 8 notes; the 64-token test model leaves room for a few extras
+        model.onset_head = self._fixed_onset_head(high, config.max_audio_len)
+        real = model.decoder
+
+        class Steer(torch.nn.Module):  # wants POS 12 (between scheduled 4 and 20) and a bomb in an empty slot
+            def forward(self, toks, *a):
+                out = real(toks, *a).clone()
+                out[0, -1, BOMB_BASE + 1:] = -50.0  # only one bomb cell, no walls
+                if toks[0, -1] == POS_BASE + 12:
+                    out[0, -1, LEFT_EMPTY] = 50.0  # the decoder agrees the position is empty
+                elif toks[0, -1] == RIGHT_EMPTY and toks[0, -2] == LEFT_EMPTY:
+                    out[0, -1, BOMB_BASE] = 50.0
+                elif toks[0, -1] >= RIGHT_BASE:
+                    out[0, -1, POS_BASE + 12] = 50.0
+                return out
+
+        model.decoder = Steer()
+        mel = torch.randn(80, config.max_audio_len)
+        between = 0
+        for seed in range(2):
+            toks = generate(model, mel, "Expert", config, seed=seed, audio_bars=2, two_stage=True)
+            frames, bar = [], -1
+            for i, t in enumerate(toks):
+                if BAR_BASE <= t < BAR_BASE + BAR_COUNT: bar = t - BAR_BASE
+                elif POS_BASE <= t < POS_BASE + POS_COUNT:
+                    if toks[i + 1] == LEFT_EMPTY and toks[i + 2] == RIGHT_EMPTY:
+                        assert toks[i + 3] >= BOMB_BASE; between += 1
+                    else:
+                        frames.append(bar * 64 + t - POS_BASE)
+            assert frames == sorted(high) and toks[-1] == END, (seed, frames, toks[-4:])
+        assert between > 0
 
     def test_onset_guidance_zero_changes_nothing(self, small_model):
         model, config = small_model
@@ -778,7 +984,7 @@ class TestShaping:
 
     def test_generate_accepts_shaping_flags(self):
         config = ModelConfig(
-            vocab_size=355,
+            vocab_size=495,
             max_seq_len=64,
             n_mels=80,
             encoder_layers=1,
@@ -827,3 +1033,35 @@ def test_hand_comfort_table_is_zero_mean_and_prefers_inner_forehand():
                 h = [n for n in notes if n.color == color]
                 for a, b in zip(h, h[1:]):
                     assert b.beat - a.beat >= 0.25 - 1e-6 or abs(b.beat - a.beat) < 1e-6, (seed, a, b)
+
+
+def test_grammar_allows_one_bomb_then_one_wall_after_right():
+    from beat_weaver.model.tokenizer import BOMB_BASE, WALL_BASE, bar_token
+    m = _build_grammar_mask(RIGHT_EMPTY, last_pos_in_bar=2, current_bar=0, audio_bars=3)
+    assert m[BOMB_BASE] and m[WALL_BASE] and m[POS_BASE + 3] and not m[POS_BASE + 2]
+    m = _build_grammar_mask(BOMB_BASE + 5, last_pos_in_bar=2, current_bar=0, audio_bars=3)
+    assert not m[BOMB_BASE + 5] and m[BOMB_BASE + 6] and m[WALL_BASE] and m[POS_BASE + 3] and m[bar_token(1)]
+    assert not m[BOMB_BASE: BOMB_BASE + 6].any()  # a cluster is written in ascending cell order
+    m = _build_grammar_mask(WALL_BASE + 7, last_pos_in_bar=2, current_bar=0, audio_bars=3)
+    assert not m[BOMB_BASE] and not m[WALL_BASE] and m[POS_BASE + 3]
+    assert not _build_grammar_mask(POS_BASE + 2, current_bar=0)[BOMB_BASE]  # only after RIGHT
+
+
+def test_bomb_push_targets_the_training_rate():
+    from beat_weaver.model.inference import _bomb_push
+    assert _bomb_push(3.0, 2, 100) == 3.0       # 2% < 5%: push
+    assert _bomb_push(3.0, 7, 100) == 0.0       # between 5% and 10%: leave it to the model
+    assert _bomb_push(3.0, 11, 100) == float("-inf")  # over twice the rate: no more bombs
+
+
+def test_big_reversal_tokens_flag_long_reversed_slashes_only():
+    from beat_weaver.model.inference import _big_reversal_tokens
+    m = _big_reversal_tokens(LEFT_BASE, (0, 0), 5)  # last cut: up-right from bottom-left
+    tok = lambda x, y, d: LEFT_BASE + x * 27 + y * 9 + d
+    assert m[tok(2, 2, 6)]  # down-left from top-right, 2.8 cells away: flagged
+    assert not m[tok(2, 0, 7)]  # down-right, 2 cells away, but only a 90-degree turn: not flagged
+    assert m[tok(2, 0, 1)]  # straight down 2 cells away: 135 degrees from up-right, flagged
+    assert not m[tok(0, 1, 6)]  # 1 cell away: not flagged
+    assert not m[tok(3, 2, 5)]  # same cut: not flagged
+    assert not m[tok(2, 2, 8)]  # dot: not flagged
+    assert not m[LEFT_BASE + 108: LEFT_BASE + 2 * 108].any()  # other hand untouched

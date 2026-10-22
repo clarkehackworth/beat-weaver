@@ -24,6 +24,9 @@ audio. BAR_k names the bar outright, so the grammar can force BAR_k → BAR_k+1
 and the audio position maps to the token directly.
 
 Compound note encoding: base + x * 27 + y * 9 + direction
+
+A hand may emit several note tokens at one POS, in ascending token order (cell, then cut), for a stack,
+tower, window or slider; the grammar only allows a higher cell with the same cut after the first.
 """
 
 from __future__ import annotations
@@ -31,7 +34,7 @@ from __future__ import annotations
 import logging
 from dataclasses import dataclass
 
-from beat_weaver.schemas.normalized import Note, NormalizedBeatmap
+from beat_weaver.schemas.normalized import Bomb, Note, NormalizedBeatmap, Obstacle
 
 logger = logging.getLogger(__name__)
 
@@ -75,7 +78,38 @@ RIGHT_COUNT = 108
 # Indexed bar tokens live after the note tokens so every pre-existing ID is unchanged.
 BAR_BASE = 291
 BAR_COUNT = 64  # max_audio_len (4096 frames) / 64 subdivisions per bar
-VOCAB_SIZE = BAR_BASE + BAR_COUNT  # 355
+VOCAB_SIZE_NOTES_ONLY = BAR_BASE + BAR_COUNT  # 355: checkpoints before bombs/walls
+
+# Optional per-position extras after RIGHT: BOMB tokens in ascending cell order (a cluster at one instant: rows,
+# frames; 66% of Expert bombs share their instant), then at most one WALL token.
+BOMB_BASE = VOCAB_SIZE_NOTES_ONLY  # 355
+BOMB_COUNT = COLS_ROWS = 12  # x * 3 + y
+WALL_BASE = BOMB_BASE + BOMB_COUNT  # 367
+WALL_DURATIONS = (0.5, 1.0, 2.0, 4.0)  # beats, bucketed
+WALL_COUNT = 4 * 4 * 2 * len(WALL_DURATIONS)  # x, width, type (0 full, 1 crouch), duration -> 128
+VOCAB_SIZE = WALL_BASE + WALL_COUNT  # 495
+
+
+def is_bomb_token(token_id: int) -> bool:
+    return BOMB_BASE <= token_id < BOMB_BASE + BOMB_COUNT
+
+
+def is_wall_token(token_id: int) -> bool:
+    return WALL_BASE <= token_id < WALL_BASE + WALL_COUNT
+
+
+def encode_wall(x: int, width: int, crouch: bool, duration_beats: float) -> int:
+    width = max(1, min(width, 4 - x))
+    d = min(range(len(WALL_DURATIONS)), key=lambda i: abs(WALL_DURATIONS[i] - duration_beats))
+    return WALL_BASE + ((x * 4 + (width - 1)) * 2 + int(crouch)) * len(WALL_DURATIONS) + d
+
+
+def decode_wall(token: int) -> tuple[int, int, bool, float]:
+    """-> (x, width, crouch, duration_beats)"""
+    v = token - WALL_BASE
+    d, v = v % len(WALL_DURATIONS), v // len(WALL_DURATIONS)
+    crouch, v = bool(v % 2), v // 2
+    return v // 4, v % 4 + 1, crouch, WALL_DURATIONS[d]
 
 
 def bar_token(bar_index: int) -> int:
@@ -151,8 +185,8 @@ def encode_beatmap(beatmap: NormalizedBeatmap) -> list[int]:
         1. Sort notes by beat
         2. Quantize beats to 1/16th note grid
         3. Group notes by quantized position
-        4. Emit: START DIFF_x BAR_0 POS_p LEFT_tok RIGHT_tok ... BAR_1 ... END
-        5. Handle multiple notes at same position (one per hand)
+        4. Emit: START DIFF_x BAR_0 POS_p LEFT_tok... RIGHT_tok... ... BAR_1 ... END
+        5. A hand's notes at one position all go in, ascending token order (stacks)
     """
     difficulty = beatmap.difficulty_info.difficulty
     diff_token = difficulty_to_token(difficulty)
@@ -163,11 +197,21 @@ def encode_beatmap(beatmap: NormalizedBeatmap) -> list[int]:
     if not notes:
         return [START, diff_token, END]
 
-    # Group notes by (bar_index, subdivision)
+    # Group notes by (bar_index, subdivision); bombs and walls (on-grid only) keyed the same way
     groups: dict[tuple[int, int], list[Note]] = {}
     for note in notes:
         key = _quantize_beat(note.beat)
         groups.setdefault(key, []).append(note)
+    bombs: dict[tuple[int, int], set[int]] = {}
+    for b in beatmap.bombs:
+        if 0 <= b.x < COLS and 0 <= b.y < ROWS:
+            bombs.setdefault(_quantize_beat(b.beat), set()).add(BOMB_BASE + b.x * ROWS + b.y)
+    walls: dict[tuple[int, int], int] = {}
+    for w in sorted(beatmap.obstacles, key=lambda w: w.beat):
+        if 0 <= w.x < COLS and w.width >= 1 and w.duration_beats > 0:
+            walls.setdefault(_quantize_beat(w.beat), encode_wall(w.x, w.width, w.height <= 3, w.duration_beats))
+    for key in (*bombs, *walls):
+        groups.setdefault(key, [])
 
     # Find the range of bars we need. Bars past the audio window cannot be
     # named (and are never in the labels: dataset clips notes to the window).
@@ -187,51 +231,39 @@ def encode_beatmap(beatmap: NormalizedBeatmap) -> list[int]:
             tokens.append(POS_BASE + sub)
 
             group_notes = groups[(bar_idx, sub)]
-            left_note: Note | None = None
-            right_note: Note | None = None
+            # Every note of a hand at this instant, in ascending token order (cell, then cut): a stack, tower,
+            # window or slider is one swing and reads as one group, like a bomb cluster. 73% of real Expert maps
+            # have stacks (median 1.3 per 100 notes); keeping one note per hand hid every one from the model.
+            for base, color, empty in ((LEFT_BASE, 0, LEFT_EMPTY), (RIGHT_BASE, 1, RIGHT_EMPTY)):
+                hand = sorted({_encode_note_token(base, n.x, n.y, n.cut_direction) for n in group_notes if n.color == color})
+                tokens.extend(hand or [empty])
 
-            for note in group_notes:
-                if note.color == 0:  # Red/Left
-                    if left_note is not None:
-                        logger.debug(
-                            "Duplicate left note at beat %s, keeping first",
-                            note.beat,
-                        )
-                        continue
-                    left_note = note
-                elif note.color == 1:  # Blue/Right
-                    if right_note is not None:
-                        logger.debug(
-                            "Duplicate right note at beat %s, keeping first",
-                            note.beat,
-                        )
-                        continue
-                    right_note = note
-
-            # Emit left token
-            if left_note is not None:
-                tokens.append(
-                    _encode_note_token(
-                        LEFT_BASE, left_note.x, left_note.y,
-                        left_note.cut_direction,
-                    )
-                )
-            else:
-                tokens.append(LEFT_EMPTY)
-
-            # Emit right token
-            if right_note is not None:
-                tokens.append(
-                    _encode_note_token(
-                        RIGHT_BASE, right_note.x, right_note.y,
-                        right_note.cut_direction,
-                    )
-                )
-            else:
-                tokens.append(RIGHT_EMPTY)
+            tokens.extend(sorted(bombs.get((bar_idx, sub), ())))
+            if (bar_idx, sub) in walls:
+                tokens.append(walls[(bar_idx, sub)])
 
     tokens.append(END)
     return tokens
+
+
+def decode_extras(token_ids: list[int], bpm: float) -> tuple[list[Bomb], list[Obstacle]]:
+    """Bombs and walls from a token sequence (decode_tokens() returns the colour notes)."""
+    bombs: list[Bomb] = []
+    walls: list[Obstacle] = []
+    current_bar, beat = -1, 0.0
+    for tok in token_ids:
+        if is_bar_token(tok):
+            current_bar = tok - BAR_BASE
+        elif POS_BASE <= tok < POS_BASE + POS_COUNT:
+            beat = (current_bar * SUBDIVISIONS_PER_BAR + tok - POS_BASE) / SUBDIVISIONS_PER_BEAT
+        elif is_bomb_token(tok):
+            v = tok - BOMB_BASE
+            bombs.append(Bomb(beat=beat, time_seconds=beat * 60.0 / bpm, x=v // ROWS, y=v % ROWS))
+        elif is_wall_token(tok):
+            x, width, crouch, dur = decode_wall(tok)
+            walls.append(Obstacle(beat=beat, time_seconds=beat * 60.0 / bpm, duration_beats=dur, x=x,
+                                  y=2 if crouch else 0, width=width, height=3 if crouch else 5))
+    return bombs, walls
 
 
 def decode_tokens(token_ids: list[int], bpm: float) -> list[Note]:
@@ -266,29 +298,16 @@ def decode_tokens(token_ids: list[int], bpm: float) -> list[Note]:
             beat = (current_bar * SUBDIVISIONS_PER_BAR + current_sub) / SUBDIVISIONS_PER_BEAT
             time_seconds = beat * 60.0 / bpm
 
-            # Expect LEFT then RIGHT token next
+            # LEFT notes (or LEFT_EMPTY), then RIGHT notes (or RIGHT_EMPTY); a hand may have several (a stack)
             i += 1
-            if i < len(token_ids):
-                left_tok = token_ids[i]
-                if LEFT_BASE <= left_tok < LEFT_BASE + LEFT_COUNT:
-                    x, y, d = _decode_note_token(left_tok, LEFT_BASE)
-                    notes.append(Note(
-                        beat=beat, time_seconds=time_seconds,
-                        x=x, y=y, color=0, cut_direction=d,
-                    ))
-                # LEFT_EMPTY — skip
-                i += 1
-
-            if i < len(token_ids):
-                right_tok = token_ids[i]
-                if RIGHT_BASE <= right_tok < RIGHT_BASE + RIGHT_COUNT:
-                    x, y, d = _decode_note_token(right_tok, RIGHT_BASE)
-                    notes.append(Note(
-                        beat=beat, time_seconds=time_seconds,
-                        x=x, y=y, color=1, cut_direction=d,
-                    ))
-                # RIGHT_EMPTY — skip
-                i += 1
+            for base, color, empty in ((LEFT_BASE, 0, LEFT_EMPTY), (RIGHT_BASE, 1, RIGHT_EMPTY)):
+                if i < len(token_ids) and token_ids[i] == empty:
+                    i += 1
+                    continue
+                while i < len(token_ids) and base <= token_ids[i] < base + LEFT_COUNT:
+                    x, y, d = _decode_note_token(token_ids[i], base)
+                    notes.append(Note(beat=beat, time_seconds=time_seconds, x=x, y=y, color=color, cut_direction=d))
+                    i += 1
             continue
 
         # Unknown token — skip

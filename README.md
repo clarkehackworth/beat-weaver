@@ -170,7 +170,7 @@ beat-weaver generate \
 
 `--downmap Easy Normal` writes those difficulties into the same folder, thinned from the generated one; `--repeats 0.7` copies repeated sections; `--emphasis 0.08` adds stacks on the loudest hits; `--drift-bias 1.5` makes hands sweep sideways (piano streams). The mapper passes all of these. Each flag's guideline is in [docs/MAPPING_GUIDELINES.md](docs/MAPPING_GUIDELINES.md).
 
-Recommended flags per difficulty are in `generation.json` beside the production model's weights (if you have that folder), and are also the presets in `beat_sim/mapper.py`. To use a checkpoint you just trained instead, pass `--checkpoint output/training/checkpoints/best`.
+Expert and Expert+ use the play-tested recipe (`RECIPE` in `beat_sim/mapper.py`; flag-by-flag reasons and per-song knobs in [docs/MAPPING_GUIDELINES.md](docs/MAPPING_GUIDELINES.md#play-tested-expert-recipe)); pass per-song tweaks with `--extra`. Hard has its own recipe (`HARD_RECIPE`), and Easy and Normal are downmapped from it. Their per-difficulty note densities are in `generation.json` beside the production model's weights (if you have that folder), and are also the presets in `beat_sim/mapper.py`. To use a checkpoint you just trained instead, pass `--checkpoint output/training/checkpoints/best`.
 
 The output folder can be copied directly to `Beat Saber_Data/CustomLevels/` to play in-game.
 

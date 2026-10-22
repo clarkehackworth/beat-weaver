@@ -1,6 +1,7 @@
 """Command-line interface for Beat Weaver data pipeline."""
 
 import argparse
+import collections
 import os
 import sys
 import logging
@@ -170,7 +171,9 @@ def cmd_train(args: argparse.Namespace) -> None:
 
     resume = Path(args.resume) if args.resume else None
     init = Path(args.init_from) if args.init_from else None
-    best_ckpt = train(config, train_ds, val_ds, Path(args.output), resume_from=resume, init_from=init)
+    probe_audio = Path(args.probe_audio) if args.probe_audio else None
+    best_ckpt = train(config, train_ds, val_ds, Path(args.output), resume_from=resume, init_from=init,
+                      probe_audio=probe_audio)
     print(f"Training complete. Best checkpoint: {best_ckpt}")
 
 
@@ -221,12 +224,13 @@ def cmd_generate(args: argparse.Namespace) -> None:
         seed=args.seed,
         onset_guidance=args.onset_guidance,
         two_stage=args.two_stage, notes_per_beat=args.notes_per_beat, min_gap_seconds=args.min_gap,
-        dynamics=args.dynamics, lead_in_seconds=args.lead_in, flow_penalty=args.flow_penalty,
+        dynamics=args.dynamics, dynamics_range=tuple(args.dynamics_range), lead_in_seconds=args.lead_in, flow_penalty=args.flow_penalty,
         end_seconds=last_music_second(audio, sr),
-        notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, column_max_run=args.column_max_run, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging,
+        notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, stack_bias=args.stack_bias, stack_target=args.stack_rate / 100, bomb_bias=args.bomb_bias, bomb_gap_bias=args.bomb_gap_bias, bomb_row_bias=args.bomb_row_bias, diagonal_bias=args.diagonal_bias, hand_balance=args.hand_balance, crossover_penalty=args.crossover_penalty, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, column_max_run=args.column_max_run, raised_max_run=args.raised_max_run, reversal_penalty=args.reversal_penalty, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging, streams=args.streams, stacks=args.stacks,
         reset_seconds=args.reset_gap, max_doubles=args.max_doubles, max_ebpm=args.max_ebpm, beat_floor=args.beat_floor, max_run=args.max_run,
         drift_bias=args.drift_bias, momentum_bias=args.momentum_bias, flow_window=args.flow_window,
         hand_bias=args.hand_bias, precision_prior=args.precision_prior,
+        extras_out=(model_extras := []),
     )
     n_windows = max(1, (mel.shape[1] - 1) // (config.max_audio_len - min(config.max_audio_len // 4, 1024)) + 1) if mel.shape[1] > config.max_audio_len else 1
 
@@ -237,6 +241,12 @@ def cmd_generate(args: argparse.Namespace) -> None:
         pairs = shaping.find_repeats(mel.T, 60.0 / bpm / 16, bpm, bars=args.repeat_bars, min_sim=args.repeats)
         notes = shaping.repeat_sections(notes, bpm, pairs, bars=args.repeat_bars)
         print(f"Repeated sections: {len(pairs)} block(s) of {args.repeat_bars} bars copied")
+    if args.vocal_snap > 0:
+        lead, peaks, _ = shaping.vocal_signal(audio, sr)
+        before = [n.time_seconds for n in notes]
+        notes = shaping.vocal_snap(notes, bpm, lead, peaks, hop_s, min_lead=args.vocal_snap)
+        moved = sum(a != b.time_seconds for a, b in zip(before, notes))
+        print(f"Vocal snap: {moved} hit(s) moved onto harmonic onsets ({(lead >= args.vocal_snap).mean():.0%} of song vocal-led)")
     if args.emphasis > 0 and args.difficulty not in ("Easy", "Normal"):
         before = len(notes)
         notes = shaping.emphasize(notes, bpm, strength, hop_s, top_frac=args.emphasis, sustain_frac=args.sliders,
@@ -247,6 +257,10 @@ def cmd_generate(args: argparse.Namespace) -> None:
         by_diff = shaping.downmap_ladder(notes, bpm, args.difficulty, [*args.downmap, args.difficulty],
                                          strength=strength, hop_s=hop_s)
     by_diff = {d: shaping.gate_patterns(ns, bpm, d) for d, ns in by_diff.items()}
+    if args.reset_gap > 0 or args.max_ebpm > 0:
+        from beat_weaver.model.inference import drop_fast_same_way
+        swing = 60.0 / args.max_ebpm if args.max_ebpm > 0 else 0.0
+        by_diff = {d: drop_fast_same_way(ns, args.reset_gap, swing) for d, ns in by_diff.items()}
 
     song_name = Path(args.audio).stem
     output = Path(args.output) if args.output else Path(f"output/{song_name}")
@@ -254,7 +268,29 @@ def cmd_generate(args: argparse.Namespace) -> None:
     if not args.no_lights:
         from beat_weaver.model.lighting import light_events
         events = {d: light_events(ns, bpm, strength, hop_s) for d, ns in by_diff.items()}
-    export_notes(by_diff, bpm, song_name, Path(args.audio), output, args.difficulty, events=events)
+    extras = None
+    if args.bombs or args.walls or model_extras:
+        # Model-generated bombs/walls (vocab 495 checkpoints) go on the generated difficulty; rule extras on all
+        from beat_weaver.model.exporter import extras_to_v2
+        extras = {d: shaping.bombs_and_walls(ns, bpm, bombs=args.bombs, walls=args.walls) for d, ns in by_diff.items()}
+        mb, mw = extras_to_v2(model_extras)
+        n_mb, n_mw = len(mb), len(mw)
+        if model_extras:
+            ln = [w["_duration"] for w in mw]
+            at = collections.Counter(b["_time"] for b in mb)
+            note_beats = {n.beat for n in by_diff[args.difficulty]}
+            print(f"Model bombs: {len(mb)}, {sum(at[b['_time']] > 1 for b in mb)} in groups, "
+                  f"{sum(b['_time'] not in note_beats for b in mb)} on beats with no note")
+            print(f"Model walls: {sum(d >= 1 for d in ln)}/{len(ln)} at least 1 beat, "
+                  f"{sum(d >= 2 for d in ln)} at least 2 beats, {sum(w['_width'] >= 3 for w in mw)} 3+ wide")
+        mb, mw = shaping.limit_extras(mb, mw, by_diff[args.difficulty], bpm, walls_per_bar=args.max_walls_per_bar)
+        if model_extras:
+            print(f"Model extras kept: {len(mb)}/{n_mb} bomb(s), {len(mw)}/{n_mw} wall(s)")
+        extras[args.difficulty] = (extras[args.difficulty][0] + mb, extras[args.difficulty][1] + mw)
+    if extras:
+        extras = {d: (b, shaping.drop_overlapping_walls(w)) for d, (b, w) in extras.items()}
+        print("Extras: " + ", ".join(f"{d} {len(b)} bomb(s), {len(w)} wall(s)" for d, (b, w) in extras.items()) + f" ({len(model_extras)} from the model)")
+    export_notes(by_diff, bpm, song_name, Path(args.audio), output, args.difficulty, events=events, extras=extras)
     counts = ", ".join(f"{d} {len(n)}" for d, n in by_diff.items())
     print(f"Generated map: {output} ({n_windows} window(s), notes: {counts})")
 
@@ -414,6 +450,8 @@ def main() -> None:
     tr.add_argument("--resume", default=None, help="Resume from checkpoint directory")
     tr.add_argument("--init-from", default=None,
                     help="Load only model weights from this checkpoint (fresh optimizer/schedule)")
+    tr.add_argument("--probe-audio", default=None,
+                    help="Song to generate after every epoch (fixed flags) and log doubles/reversal/left/nps shares: decoder drift that val loss misses")
 
     # generate
     gen = sub.add_parser("generate", help="Generate a Beat Saber map from audio")
@@ -439,22 +477,36 @@ def main() -> None:
                      help="Two-stage density target in notes/second (overrides --notes-per-beat; favourites Expert ~3.8, Expert+ ~4.8)")
     gen.add_argument("--stream-bias", type=float, default=1.0,
                      help="Two-stage: keep a run going while the next frame's onset prob >= this x the bar peak (1 = off, 0.6 = long streams)")
+    gen.add_argument("--stack-rate", type=float, default=1.3,
+                     help="With --stack-bias: stacked notes per 100 to aim for (real Expert median 1.3, p75 3.3)")
+    gen.add_argument("--stack-bias", type=float, default=0.0,
+                     help="With --stacks: logit bonus for continuing a hand's note as a stack, until --stack-rate")
     gen.add_argument("--doubles-bias", type=float, default=0.0,
                      help="Logit bonus for a right-hand note right after a left-hand note (0 = off; ~1.5 reaches favourites' doubles rate)")
     gen.add_argument("--vision-penalty", type=float, default=3.0,
                      help="Logit penalty on notes in the middle-row centre cells (vision blocks); favourites keep ~2%% there")
     gen.add_argument("--vision-max-run", type=int, default=2,
                      help="Max consecutive hits containing a centre-cell note before those cells are masked (0 = no cap)")
+    gen.add_argument("--reversal-penalty", type=float, default=0.0,
+                     help="Logit penalty on a 2+ cell cut reversed within half a beat of the same hand's last note, while over 43%% of such fast swings are big reversals (real Expert median; Expert+ 53%%). Try 3-6")
     gen.add_argument("--column-max-run", type=int, default=0,
                      help="Max consecutive notes one hand puts in the same column before it must move (0 = no cap; 4 tames long up/down straights)")
+    gen.add_argument("--raised-max-run", type=int, default=0,
+                     help="Max consecutive notes one hand puts in the upper two rows before it drops to the bottom row (0 = no cap; real Expert median longest run is 5)")
     gen.add_argument("--reset-gap", type=float, default=0.5,
-                     help="Seconds: a hand may not cut the same way (within 45 degrees) again this soon (0 = off)")
+                     help="Seconds: a hand may not cut the same way (within 45 degrees, or both up / both down) again this soon (0 = off)")
     gen.add_argument("--max-doubles", type=float, default=1.0,
                      help="Cap on the fraction of hits that use both hands (1.0 = no cap)")
     gen.add_argument("--max-ebpm", type=float, default=0.0,
                      help="Per-hand effective BPM cap: 60 / seconds between one hand's swings (0 = off; favourites p90: Easy 140, Normal 240, Hard 280, Expert 310, Expert+ 385)")
     gen.add_argument("--beat-floor", type=float, default=0.0,
                      help="Two-stage: a beat whose onset peak is under this fraction of its bar's peak gets no note (0 = every beat gets one)")
+    gen.add_argument("--stacks", action="store_true",
+                     help="Let a hand put several same-cut notes at one instant (stacks, towers, windows). Only with a "
+                          "checkpoint fine-tuned on stack tokens (run 5+); older ones put random mass there")
+    gen.add_argument("--streams", type=float, default=0.0, metavar="FRAC",
+                     help="Two-stage: play the schedule's longest dense chains (8+ hits within half a beat) as streams, one "
+                          "alternating note per hit, until FRAC of notes are in one (real Expert median 0.10; 0 = off)")
     gen.add_argument("--max-run", type=int, default=0,
                      help="Two-stage: longest run of notes within half a beat of each other; the run then rests a whole beat (0 = no cap)")
     gen.add_argument("--precision-prior", type=float, default=0.0,
@@ -488,8 +540,28 @@ def main() -> None:
     gen.add_argument("--sliders", type=float, default=0.0, metavar="FRAC",
                      help="With --emphasis: FRAC of isolated hits on sustained sounds become 2-dot sliders (0 = off)")
     gen.add_argument("--no-lights", action="store_true", help="Skip the rules-based lightshow (lighting.light_events)")
+    gen.add_argument("--vocal-snap", type=float, default=0.0, metavar="LEAD",
+                     help="Snap hits in vocal-led stretches (harmonic/percussive onset ratio >= LEAD, try 1.5) onto harmonic onsets (0 = off)")
+    gen.add_argument("--bombs", action="store_true", help="Add bomb resets at 2/3 of same-cut rests (shaping.bombs_and_walls)")
+    gen.add_argument("--walls", action="store_true", help="Add a full-width crouch wall in rests of 4+ beats")
+    gen.add_argument("--crossover-penalty", type=float, default=0.0,
+                     help="Logit penalty on a hand's notes in the other half while the last 16 notes exceed the training crossover rate (21%%; try 2-4)")
+    gen.add_argument("--hand-balance", type=float, default=0.0,
+                     help="Steer single notes to the hand that is behind (logit push scaled by the L/R imbalance; try 5-15)")
+    gen.add_argument("--diagonal-bias", type=float, default=0.0,
+                     help="Logit boost on diagonal cuts (the decoder over-uses plain up/down; try 0.5-1.5)")
+    gen.add_argument("--bomb-gap-bias", type=float, default=0.0,
+                     help="Logit boost on opening a bomb-only position between scheduled notes (model puts ~1%% there; try 2-4; needs an extras checkpoint and --two-stage)")
+    gen.add_argument("--bomb-row-bias", type=float, default=0.0,
+                     help="Logit boost on adding more bombs to a bomb-only position (rows/frames; the model gives ~8%% where real maps have ~38%%; try 1-3)")
+    gen.add_argument("--bomb-bias", type=float, default=0.0,
+                     help="Logit boost on BOMB tokens after each right-hand note (model under-emits bombs ~15x; try 2-4; needs an extras checkpoint)")
+    gen.add_argument("--max-walls-per-bar", type=float, default=1.0, metavar="N",
+                     help="Cap on model-made walls per bar after dropping short, 3-wide and note-covering ones (0 = none)")
     gen.add_argument("--dynamics", type=float, default=1.0,
                      help="Two-stage: how much each bar's note budget follows the music (0 = flat/staccato, 1 = full)")
+    gen.add_argument("--dynamics-range", type=float, nargs=2, default=[0.0, 2.0], metavar=("LO", "HI"),
+                     help="Two-stage: clamp each bar's budget to LO..HI x the mean density (0.7 1.3 evens out busy and sparse sections)")
     gen.add_argument("--lead-in", type=float, default=2.0,
                      help="Seconds at the start of the song with no notes")
 

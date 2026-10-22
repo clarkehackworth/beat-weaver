@@ -150,7 +150,7 @@ def youtube_cover(title: str, artist: str, hint: str = "") -> tuple[bytes, str] 
 
     `hint` is the audio file's own name, which for a YouTube download is the video's title. It is what
     gets searched, and among the results that name the song and artist, the one whose words overlap it
-    most wins. Without it "LISA - SaWaDiKa" matched a live VMA performance before the official video.
+    most wins. Without it "Artist - Title" matched a live performance before the official video.
 
     ponytail: this parses the results page, which Google can change without notice. If it stops
     matching, the iTunes lookup below still works, and --cover always overrides.
@@ -172,7 +172,7 @@ def youtube_cover(title: str, artist: str, hint: str = "") -> tuple[bytes, str] 
         if len(seen) > 10:
             break
         vid, vtitle = m.group(1), json.loads(f'"{t.group(1)}"')
-        # the uploader's channel name often carries the artist ("Linkin Park" posting "In The End")
+        # the uploader's channel name often carries the artist ("Example Band" posting "Sample Song")
         owner = re.search(r'"ownerText":\{"runs":\[\{"text":"((?:[^"\\]|\\.)*)"', chunk)
         if _title_matches(vtitle + " " + (json.loads(f'"{owner.group(1)}"') if owner else ""), title, artist):
             ranked.append((-len(want & _tokens(vtitle)), len(ranked), vid, vtitle))
@@ -202,7 +202,7 @@ def itunes_cover(title: str, artist: str) -> tuple[bytes, str] | None:
 
 
 def _squash(text: str) -> str:
-    """Letters and digits only, so "Crushcrushcrush" matches "Crush Crush Crush" and "Goin' Out West" "Goin Out West"."""
+    """Letters and digits only, so "Samplesong" matches "Sample Song", and "Sample's Song" matches "Samples Song"."""
     return re.sub(r"[^a-z0-9]", "", text.lower())
 
 
@@ -216,10 +216,10 @@ _EXTRA = re.compile(r"\s*[\(\[]([^\)\]]*\b(?:cover|feat\.?|ft\.?|remix|live|reim
 def itunes_identify(stem: str, title: str, artist: str) -> tuple[str, str] | None:
     """(title, artist) for a file name, checked against the iTunes catalogue; None when nothing matches.
 
-    A file name can't say which side of the dash is the artist ("Call Me - Shinedown") and often has
-    no artist at all ("Gangstas Paradise"). A result is taken when its track and artist names both
+    A file name can't say which side of the dash is the artist ("Sample Song - Example Band") and often has
+    no artist at all ("Sample Song"). A result is taken when its track and artist names both
     appear in the file name; failing that, when the guessed artist is empty, a result whose track
-    name appears in it (that is how "What Have You Done (feat. Keith Caputo)" finds Within Temptation).
+    name appears in it (that is how "Sample Song (feat. Guest Singer)" finds Example Band).
     """
     raw = f"{artist} {title}".strip()
     bare = re.sub(r"[\(\[][^\)\]]*[\)\]]", "", raw).strip()  # "(Cover by ...)" often sinks the search
@@ -318,15 +318,15 @@ def song_meta(audio: Path, title: str | None = None, artist: str | None = None, 
 
 if __name__ == "__main__":
     cases = {
-        "LISA - SaWaDiKa (Official Music Video)": ("SaWaDiKa", "LISA"),
-        "In The End [Official HD Music Video] - Linkin Park": ("In The End", "Linkin Park"),
-        "Linkin Park _26 Eminem - Lying From You (2020)": ("Lying From You", "Linkin Park & Eminem"),
-        "Halsey - Gasoline": ("Gasoline", "Halsey"),
-        "Evanescence - Lies Lyrics (Origin)": ("Lies (Origin)", "Evanescence"),
-        "Evanescence - Whisper lyrics": ("Whisper", "Evanescence"),
+        "Example Band - Sample Song (Official Music Video)": ("Sample Song", "Example Band"),
+        "Sample Song [Official HD Music Video] - Example Band": ("Sample Song", "Example Band"),
+        "Example Band _26 Guest Act - Other Song (2020)": ("Other Song", "Example Band & Guest Act"),
+        "Example Band - Third Song": ("Third Song", "Example Band"),
+        "Example Band - Fourth Song Lyrics (Origin)": ("Fourth Song (Origin)", "Example Band"),
+        "Example Band - Fifth Song lyrics": ("Fifth Song", "Example Band"),
         "Just A Title": ("Just A Title", ""),
-        "Dessa - 5 out of 6 (Official Audio)": ("5 out of 6", "Dessa"),
-        "Evanescence - Imaginary (Remastered 2023) - Official Visualizer": ("Imaginary", "Evanescence"),
+        "Other Act - 5 out of 6 (Official Audio)": ("5 out of 6", "Other Act"),
+        "Example Band - Sixth Song (Remastered 2023) - Official Visualizer": ("Sixth Song", "Example Band"),
     }
     for stem, want in cases.items():
         got = parse_filename(stem)

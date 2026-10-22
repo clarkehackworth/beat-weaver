@@ -40,7 +40,7 @@ BANDS = {
         'inline': (0.000, 0.618),
         'zigzag3': (0.000, 4.919),
         'ebpm': (0.0, 141.7),
-        'tangle': (0.000, 0.000), 'gallop': (0.000, 0.958), 'inline4': (0.000, 2.366), 'staircase': (0.000, 0.000),
+        'tangle': (0.000, 0.000), 'gallop': (0.000, 0.958), 'inline4': (0.000, 2.366), 'staircase': (0.000, 0.000), 'loloppe': (0.000, 0.000), 'shrado': (0.000, 0.000),
         'fine': (0.000, 0.016),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
@@ -68,7 +68,7 @@ BANDS = {
         'inline': (0.000, 0.553),
         'zigzag3': (0.000, 6.192),
         'ebpm': (0.0, 239.0),
-        'tangle': (0.000, 0.000), 'gallop': (0.000, 3.246), 'inline4': (0.000, 3.345), 'staircase': (0.000, 0.000),
+        'tangle': (0.000, 0.000), 'gallop': (0.000, 3.246), 'inline4': (0.000, 3.345), 'staircase': (0.000, 0.000), 'loloppe': (0.000, 0.000), 'shrado': (0.000, 0.000),
         'fine': (0.000, 0.200),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
@@ -96,7 +96,7 @@ BANDS = {
         'inline': (0.000, 0.388),
         'zigzag3': (0.000, 8.071),
         'ebpm': (0.0, 280.0),
-        'tangle': (0.000, 0.000), 'gallop': (0.000, 6.274), 'inline4': (0.000, 3.782), 'staircase': (0.000, 0.000),
+        'tangle': (0.000, 0.000), 'gallop': (0.000, 6.274), 'inline4': (0.000, 3.782), 'staircase': (0.000, 0.000), 'loloppe': (0.000, 0.000), 'shrado': (0.000, 0.000),
         'fine': (0.000, 0.286),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
@@ -124,7 +124,7 @@ BANDS = {
         'inline': (0.000, 0.353),
         'zigzag3': (0.665, 9.364),
         'ebpm': (0.0, 308.0),
-        'tangle': (0.000, 0.001), 'gallop': (0.000, 7.785), 'inline4': (0.000, 3.368), 'staircase': (0.000, 0.000),
+        'tangle': (0.000, 0.001), 'gallop': (0.000, 7.785), 'inline4': (0.000, 3.368), 'staircase': (0.000, 0.000), 'loloppe': (0.000, 0.000), 'shrado': (0.000, 0.000),
         'fine': (0.000, 0.276),
         'energy_corr': (0.289, 1.0),
         'onset_hit': (0.624, 1.0),
@@ -152,7 +152,7 @@ BANDS = {
         'inline': (0.000, 0.372),
         'zigzag3': (0.790, 10.860),
         'ebpm': (0.0, 384.0),
-        'tangle': (0.000, 0.006), 'gallop': (0.000, 9.355), 'inline4': (0.000, 3.457), 'staircase': (0.000, 0.000),
+        'tangle': (0.000, 0.006), 'gallop': (0.000, 9.355), 'inline4': (0.000, 3.457), 'staircase': (0.000, 0.000), 'loloppe': (0.000, 0.000), 'shrado': (0.000, 0.000),
         'fine': (0.000, 0.511),
         'energy_corr': (0.286, 1.0),
         'onset_hit': (0.621, 1.0),
@@ -172,6 +172,7 @@ WEIGHTS = {  # what matters most, per the alignment discussion
     "lateral": 2, "inline": 1, "zigzag3": 1,
     # bsmg named bad patterns (backlog 10), bands from the 535 favourites (tangle/staircase: p90 is ~0, so any is out of band)
     "tangle": 1, "gallop": 1, "inline4": 1, "staircase": 1,
+    "loloppe": 1, "shrado": 1,  # ponytail: bands (0, 0) by definition, not yet measured on the favourites; recalibrate when the folder is at hand
     "fine": 1,  # share of notes at 1/8 beat or finer (offset-corrected, triplets on-grid)
 }
 # Graded instead of pass/fail: full credit in the middle half of the band, fading to 0 at either edge.
@@ -227,6 +228,25 @@ def _staircase(a: Note, b: Note) -> bool:
         return False
     v = _CUT[a.cut_direction]
     return (v[0], v[1]) not in ((dx, dy), (-dx, -dy))  # a cut along the diagonal is one clean swipe
+
+
+def _loloppe(a: Note, b: Note) -> bool:
+    """bsmg glossary: two same-direction blocks side by side that one swing can only hit by abusing the hitbox.
+
+    Side by side = orthogonally adjacent with the shared cut running across the line that joins them (along
+    it is a stack, which is one clean swing)."""
+    dx, dy = b.x - a.x, b.y - a.y
+    if abs(dx) + abs(dy) != 1 or a.cut_direction != b.cut_direction or a.cut_direction not in _CUT:
+        return False
+    v = _CUT[a.cut_direction]
+    return v[0] * dx + v[1] * dy == 0
+
+
+def _shrado(a: Note, b: Note) -> bool:
+    """bsmg glossary: an outward-facing diagonal-down block in a far lane, then an up block of the same colour
+    in a lane 2+ closer (3 lanes spanned); players cut the up block diagonally. ``a``, ``b`` consecutive same-hand swings."""
+    out = (a.x == 0 and a.cut_direction == 6) or (a.x == 3 and a.cut_direction == 7)
+    return out and b.cut_direction == 0 and abs(b.x - a.x) >= 2
 
 
 def _cuts_through(a: Note, b: Note) -> bool:
@@ -295,7 +315,7 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
         by_t.setdefault(round(x.time_seconds, 3), []).append(x)
     # Lateral motion per hand between its own consecutive swings within a beat: how far it moves
     # sideways, how often it stays put (inline), and monotonic 3+ lane runs (the piano-stream shape).
-    dxs, inline, mono3, inline4 = [], 0, 0, 0
+    dxs, inline, mono3, inline4, shrado = [], 0, 0, 0, 0
     for hand in (0, 1):
         h = sorted((x for x in n if x.color == hand), key=lambda x: x.time_seconds)
         run, lastd, parked = 1, 0, 1
@@ -303,6 +323,7 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
             if (b.time_seconds - a.time_seconds) / beat > 1.01:
                 run, lastd, parked = 1, 0, 1
                 continue
+            shrado += _shrado(a, b)
             d = b.x - a.x
             dxs.append(abs(d))
             inline += d == 0 and b.y == a.y
@@ -329,13 +350,14 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
                  for i in range(len(sizes) - 2))
     # timing precision (bsmg Basic: Timing): most songs need only 1/1, 1/2, 1/4 (and triplets); 1/8 and finer is overmapping
     # Scored at the beat offset that fits best: many community maps carry a constant offset that is not precision.
-    g = (np.array([x.beat for x in n])[None, :] - np.arange(0, 1, 0.01)[:, None]) % 1.0  # (offsets, notes)
-    on_grid = (np.abs(g * 4 - np.round(g * 4)) < 0.05) | (np.abs(g * 3 - np.round(g * 3)) < 0.05)
+    off = (np.array([x.beat for x in n])[None, :] - np.arange(0, 1, 0.01)[:, None]) % 1.0  # (offsets, notes); not `g`, the note gaps
+    on_grid = (np.abs(off * 4 - np.round(off * 4)) < 0.05) | (np.abs(off * 3 - np.round(off * 3)) < 0.05)
     fine = float(1.0 - on_grid.mean(axis=1).max())
     # arm tangle: red right of blue at the same time with opposite vertical cuts, so the arms cross and pull apart
     tangle = sum(_tangle(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     # staircase hitbox abuse: two same-colour notes at one time on a diagonal, cut across the diagonal
     staircase = sum(_staircase(a, b) for ns in by_t.values() for a in ns for b in ns if a is not b and a.color == b.color) // 2
+    loloppe = sum(_loloppe(a, b) for ns in by_t.values() for a in ns for b in ns if a is not b and a.color == b.color) // 2
     conv = sum(_converging(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     near = sum(_near_converging(l, r) for ns in by_t.values() for l in ns if l.color == 0 for r in ns if r.color == 1)
     return {
@@ -364,6 +386,8 @@ def stats(notes: list[Note], bpm: float) -> dict[str, float]:
         "gallop": 100.0 * gallop / max(len(ut), 1),
         "inline4": 100.0 * inline4 / pairs,
         "staircase": staircase / max(len(ut), 1),
+        "loloppe": loloppe / max(len(ut), 1),
+        "shrado": 100.0 * shrado / pairs,
         "fine": fine,
     }
 

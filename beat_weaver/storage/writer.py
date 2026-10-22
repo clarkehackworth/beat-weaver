@@ -328,21 +328,21 @@ def write_parquet(
         json.dump(metadata_list, f, indent=2)
 
 
-def read_notes_parquet(path: Path) -> pa.Table:
-    """Read notes Parquet file(s) and return a single Arrow table.
+def read_notes_parquet(path: Path, kind: str = "notes") -> pa.Table:
+    """Read ``kind`` Parquet file(s) (notes, bombs or obstacles) and return a single Arrow table.
 
     Accepts either a single ``.parquet`` file or a directory containing
-    ``notes_*.parquet`` files.
+    ``{kind}_*.parquet`` files.
     """
     path = Path(path)
     if path.is_dir():
-        files = sorted(path.glob("notes_*.parquet"))
+        files = sorted(path.glob(f"{kind}_*.parquet"))
         if not files:
             # Backward compat: try single-file layout
-            single = path / "notes.parquet"
+            single = path / f"{kind}.parquet"
             if single.exists():
                 return pq.read_table(single)
-            raise FileNotFoundError(f"No notes Parquet files in {path}")
+            raise FileNotFoundError(f"No {kind} Parquet files in {path}")
         tables = [pq.read_table(f) for f in files]
         return pa.concat_tables(tables)
     return pq.read_table(path)

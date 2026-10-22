@@ -63,7 +63,7 @@ AUDIO_EXTS = {".mp3", ".ogg", ".wav", ".flac", ".m4a"}
 DEFAULT_PRESET = {
     "Easy":       dict(nps=1.33, min_gap=0.4, doubles_bias=0.3, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.15),
     "Normal":     dict(nps=1.94, min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.2),
-    "Hard":       dict(nps=2.7, min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25),
+    "Hard":       dict(nps=3.1, min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25),
     "Expert":     dict(nps=3.33, min_gap=0.1, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=4, reset_gap=0.5, max_doubles=0.4),
     "ExpertPlus": dict(nps=4.17, min_gap=0.1, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=0.8, column_max_run=4, reset_gap=0.5, max_doubles=0.45),
 }
@@ -134,7 +134,13 @@ def load_presets(host: str, container: str, checkpoint: str, remote: bool) -> di
     return presets
 
 
-def flags_for(p: dict, seed: int) -> str:
+def flags_for(p: dict, seed: int, diff: str = "", downmap: tuple[str, ...] = ()) -> str:
+    from beat_sim.mapper import HARD_RECIPE, RECIPE, RECIPE_DIFFS
+    if diff == "Hard":  # one Hard generation also writes the requested Easy/Normal, thinned from it
+        dm = (" --downmap " + " ".join(downmap)) if downmap else ""
+        return f"{HARD_RECIPE} --notes-per-second {p['nps']} --seed {seed}{dm}"
+    if diff in RECIPE_DIFFS:  # play-tested recipe (docs/MAPPING_GUIDELINES.md); only the density comes from the preset
+        return f"{RECIPE} --notes-per-second {p['nps']} --seed {seed}"
     return (f"--two-stage --notes-per-second {p['nps']} --min-gap {p['min_gap']} "
             f"--doubles-bias {p['doubles_bias']} --flow-penalty {p['flow_penalty']} "
             f"--dynamics {p['dynamics']} --vision-penalty {p['vision_penalty']} "
@@ -142,14 +148,14 @@ def flags_for(p: dict, seed: int) -> str:
             f"--reset-gap {p['reset_gap']} --max-doubles {p['max_doubles']} --seed {seed}")
 
 
-def build_wave(n: int, tasks: list[tuple[str, str]], presets: dict, checkpoint: str, seed: int) -> Path:
+def build_wave(n: int, tasks: list[tuple[str, str]], presets: dict, checkpoint: str, seed: int, downmap: tuple[str, ...] = ()) -> Path:
     lines = ["#!/bin/bash", "set -u", "cd /data", ENV]
     lines.append("run(){ python -m beat_weaver.cli generate --checkpoint " + checkpoint
                  + " --audio \"$1\" --difficulty \"$2\" --output \"$3\" $4 > \"$3.log\" 2>&1; }")
     lines.append(f"mkdir -p {REMOTE_OUT}")
     for song_name, diff in tasks:
         outdir = f"{REMOTE_OUT}/{Path(song_name).stem}__{diff}"
-        lines.append(f"run {shlex.quote(REMOTE_INBOX + '/' + song_name)} {diff} {shlex.quote(outdir)} {shlex.quote(flags_for(presets[diff], seed))} &")
+        lines.append(f"run {shlex.quote(REMOTE_INBOX + '/' + song_name)} {diff} {shlex.quote(outdir)} {shlex.quote(flags_for(presets[diff], seed, diff, downmap))} &")
     lines.append("wait")
     lines.append(f"echo DONE_WAVE_{n}")
     script = Path(tempfile.gettempdir()) / f"bw_batch_wave{n}.sh"
@@ -263,10 +269,12 @@ def main() -> None:
     print(f"uploading {len(files)} songs ...")
     upload_audio(args.bw_host, args.container, files)
 
+    # With Hard requested, Easy and Normal come from the Hard job (--downmap) instead of being generated alone.
+    downmap = tuple(d for d in ("Easy", "Normal") if d in args.difficulties) if "Hard" in args.difficulties else ()
     tasks: list[tuple[str, str]] = []
     have = set(dexec(args.bw_host, args.container, f"cd {REMOTE_OUT} && ls -d */*.dat 2>/dev/null", check=False).split("\n"))
     for f in files:
-        for d in args.difficulties:
+        for d in (d for d in args.difficulties if d not in downmap):
             if f"{f.stem}__{d}/{d}.dat" in have:
                 print(f"  [have] {f.stem}__{d}")
             else:
@@ -278,7 +286,7 @@ def main() -> None:
             continue
         t0 = time.time()
         print(f"wave {i}/{len(waves)} ({len(wave)} jobs) ...", flush=True)
-        script = build_wave(i, wave, presets, args.checkpoint, args.seed)
+        script = build_wave(i, wave, presets, args.checkpoint, args.seed, downmap)
         deploy_and_run_wave(args.bw_host, args.container, i, script)
         print(f"  wave {i} done in {time.time()-t0:.0f}s", flush=True)
 
@@ -298,11 +306,11 @@ def main() -> None:
     for f in files:
         dats = {}
         for d in args.difficulties:
-            p = fetch_root / f"{f.stem}__{d}"
+            p = fetch_root / f"{f.stem}__{'Hard' if d in downmap else d}"
             if (p / f"{d}.dat").exists():
                 dats[d] = p
-            elif (log := fetch_root / f"{f.stem}__{d}.log").exists():
-                print(f"  [fail] {f.stem}__{d}: " + (log.read_text().strip().splitlines() or ["(empty log)"])[-1])
+            elif (log := fetch_root / f"{p.name}.log").exists():
+                print(f"  [fail] {p.name}: " + (log.read_text().strip().splitlines() or ["(empty log)"])[-1])
         if not dats:
             miss += 1
             print(f"[skip] {f.name}: no difficulties generated")

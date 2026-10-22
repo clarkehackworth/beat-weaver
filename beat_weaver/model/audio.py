@@ -127,38 +127,35 @@ def detect_bpm(
     return refine_bpm(audio, sr, tempo)
 
 
-def refine_bpm(audio: np.ndarray, sr: int, tempo: float, span: float = 1.5, step: float = 0.05, hop: int = 220,
-               min_gain: float = 1.05) -> float:
-    """Snap a rough tempo to the candidate within +-span BPM whose beat grid locks tightest to the audio.
+def refine_bpm(audio: np.ndarray, sr: int, tempo: float, frac: float = 0.06, step: float = 0.01, hop: int = 220,
+               min_prominence: float = 3.0) -> float:
+    """Move a rough tempo to the candidate within +-``frac`` of it whose beat grid locks tightest to the audio.
 
-    Beat trackers are often off by a fraction of a BPM (80.7 for an 80.0 song), and a
-    0.7 BPM error walks the beat grid through a full beat every ~85 s, so by mid-song
-    every bar is phase-shifted. Score = how concentrated the onset energy is when binned by
-    phase within the beat (sum of squared bin shares, 32 bins), over the whole song. Concentration
-    is far more sensitive than max/mean with few bins: neighbouring tempos 0.1 BPM apart separate
-    clearly. Ties go to the candidate nearest a whole number.
+    Beat trackers quantise tempo to their frame rate (129.2 for a 128 or 132 song, 117.45 for 115 or 120),
+    and a 1 BPM error walks the beat grid through a full beat every minute, so by mid-song every bar is
+    off the music (seen in play testing). Score = phase coherence of the onset envelope at
+    the beat, half-beat and quarter-beat rates summed: one vector per frame at its phase in the beat,
+    weighted by onset strength; a grid that matches the song keeps them pointing one way for the whole
+    song. Measured on 41 official songs against their real BPM (octave errors allowed): tracker 2/41
+    within 0.15 BPM, the old +-1.5 BPM binned search 18/41, this 32/41.
     """
     n = len(audio) // hop
     if n < 10:
         return tempo
     rms = np.sqrt((audio[: n * hop].astype(np.float32).reshape(n, hop) ** 2).mean(axis=1))
     d = np.clip(np.diff(np.log1p(rms * 100), prepend=0.0), 0, None)
+    w = d / max(d.sum(), 1e-9)
     t = np.arange(n) * hop / sr
-    bins = 32
 
-    def lock(cand: float) -> float:
-        beat = 60.0 / cand
-        ph = ((t % beat) / beat * bins).astype(int) % bins
-        share = np.bincount(ph, weights=d, minlength=bins)
-        share = share / max(share.sum(), 1e-9)
-        return float((share**2).sum()) - 1e-4 * abs(cand - round(cand))  # tie-break toward integers
+    def lock(c: np.ndarray) -> np.ndarray:
+        return sum(np.abs(np.exp(2j * np.pi * h * np.outer(c, t) / 60) @ w) for h in (1, 2, 4))
 
-    cands = np.arange(tempo - span, tempo + span + 1e-9, step)
-    best = max(cands, key=lock)
-    # Only move the tempo when the lock is clearly sharper than the detector's own value. Songs
-    # without a steady pulse give a flat, noisy score where "best" is arbitrary (measured: sawadika
-    # and In The End gain 0.1-0.2%, lying 12.7%), so the detector's tempo is kept there.
-    if lock(best) < min_gain * lock(tempo):
+    cands = np.arange(tempo * (1 - frac), tempo * (1 + frac), step)
+    scores = np.concatenate([lock(c) for c in np.array_split(cands, max(1, len(cands) // 50))])
+    best = float(cands[scores.argmax()])
+    # Songs without a steady pulse give a flat, noisy score where "best" is arbitrary, so the detector's
+    # tempo is kept unless the peak stands out. Measured peak / median: noise 1.6-1.9, songs 4-16.
+    if scores.max() < min_prominence * np.median(scores):
         return tempo
     return float(round(best, 2))
 

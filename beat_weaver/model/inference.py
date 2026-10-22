@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import collections
+
 import torch
 import torch.nn.functional as F
 
@@ -29,8 +31,15 @@ from beat_weaver.model.tokenizer import (
     RIGHT_EMPTY,
     START,
     VOCAB_SIZE,
+    BOMB_BASE,
+    BOMB_COUNT,
+    WALL_BASE,
+    WALL_COUNT,
+    decode_extras,
     decode_tokens,
     difficulty_to_token,
+    is_bomb_token,
+    is_wall_token,
 )
 from beat_weaver.model.transformer import BeatWeaverModel
 from beat_weaver.schemas.normalized import Note
@@ -50,6 +59,13 @@ _CUT_VEC = torch.tensor(
     dtype=torch.float32,
 )
 _CUT_UNIT = torch.nn.functional.normalize(_CUT_VEC, dim=1)
+
+
+def _same_way(a: int, b: int) -> bool:
+    """Two cuts need a reset between them: within 45 degrees, or both swinging up (or both down). Up-left then
+    up-right is 90 degrees apart but still two upswings (seen in play testing: 0.09 s apart)."""
+    va, vb = _CUT_VEC[a], _CUT_VEC[b]
+    return float(va @ vb) > 0 or float(va[1] * vb[1]) > 0
 
 
 def _note_tokens_on_cell(base: int, x: int, y: int) -> slice:
@@ -94,9 +110,20 @@ def _converging_right_tokens(left_cell: tuple[int, int], left_dir: int, block_ne
                 rv = _CUT_VEC[d]
                 if any((x + k * int(rv[0]), y + k * int(rv[1])) == left_cell for k in (1, 2)):
                     m[sl.start + d] = True
+    # approach: a RIGHT cut whose saber arrives through the LEFT note's cell (one step against its cut)
+    for x in range(COLS):
+        for y in range(ROWS):
+            sl = _note_tokens_on_cell(RIGHT_BASE, x, y)
+            for d in range(8):
+                rv = _CUT_VEC[d]
+                if (x - int(rv[0]), y - int(rv[1])) == left_cell:
+                    m[sl.start + d] = True
     if left_dir < 0 or left_dir == 8:
         return m
     lv = _CUT_VEC[left_dir]
+    cx, cy = left_cell[0] - int(lv[0]), left_cell[1] - int(lv[1])  # ... and the LEFT saber arrives through the RIGHT note's cell
+    if 0 <= cx < COLS and 0 <= cy < ROWS:
+        m[_note_tokens_on_cell(RIGHT_BASE, cx, cy)] = True
     for k in (1, 2):  # ... and the LEFT blade's path runs over the RIGHT note's cell, whatever its cut
         cx, cy = left_cell[0] + k * int(lv[0]), left_cell[1] + k * int(lv[1])
         if 0 <= cx < COLS and 0 <= cy < ROWS:
@@ -134,7 +161,7 @@ def _converging_right_tokens(left_cell: tuple[int, int], left_dir: int, block_ne
 
 
 def _reset_tokens(base: int, last_dir: int) -> torch.Tensor:
-    """Boolean (VOCAB_SIZE,) mask of this hand's tokens cutting within 45 degrees of its last cut.
+    """Boolean (VOCAB_SIZE,) mask of this hand's tokens that cut the same way as its last cut (``_same_way``).
 
     Cutting the same way twice in a row means the saber has to come back first (a reset).
     Dots are left alone. ponytail: no slider exception; add one if fast same-way sliders are wanted.
@@ -142,7 +169,7 @@ def _reset_tokens(base: int, last_dir: int) -> torch.Tensor:
     m = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
     if last_dir < 0 or last_dir == 8:
         return m
-    same = [d for d in range(8) if float(_CUT_VEC[d] @ _CUT_VEC[last_dir]) > 0]
+    same = [d for d in range(8) if _same_way(d, last_dir)]
     for x in range(COLS):
         for y in range(ROWS):
             sl = _note_tokens_on_cell(base, x, y)
@@ -151,12 +178,77 @@ def _reset_tokens(base: int, last_dir: int) -> torch.Tensor:
     return m
 
 
+CROSSOVER_TARGET = 0.21  # share of notes in the other hand's half, Expert training data
+STACK_TARGET = 0.013  # default stacked notes per note: real Expert median 1.3 per 100 (p75 3.3)
+DIAGONAL_TARGET = 0.30  # share of cuts 4-7 in the Expert training data
+BOMB_TARGET = 0.05  # bombs per note, Expert training data
+
+
+def _bomb_push(bias: float, n_bombs: int, n_notes: int) -> float:
+    """Logit push on BOMB tokens: ``bias`` while under the training rate, none up to twice it, -inf above."""
+    rate = n_bombs / max(n_notes, 1)
+    return bias if rate < BOMB_TARGET else 0.0 if rate < 2 * BOMB_TARGET else float("-inf")
+
+
 def _vision_tokens(base: int) -> torch.Tensor:
     """Boolean (VOCAB_SIZE,) mask of this hand's note tokens on the vision-block cells."""
     m = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
     for x, y in VISION_CELLS:
         m[_note_tokens_on_cell(base, x, y)] = True
     return m
+
+
+_ANGLE = {0: 90, 1: 270, 2: 180, 3: 0, 4: 135, 5: 45, 6: 225, 7: 315}
+
+
+def _swings_back_through(px: int, py: int, pd: int, qx: int, qy: int, qd: int) -> bool:
+    """A hand that cut (px, py) along pd ends past that cell; to cut (qx, qy) along qd it must first wind up
+    on the cell's far side. True when that wind-up path runs back through the note itself: the hand travels
+    toward an edge and the next cut asks it to come from beyond the edge (played: a red note on the right
+    wanting an inward cut while the saber was already heading out). Real Expert maps: median 0, p90 2.2% of
+    a hand's swings within a beat; generated maps 3-9%."""
+    if not (0 <= pd < 8 and 0 <= qd < 8):
+        return False
+    a, b = _CUT_UNIT[pd].tolist(), _CUT_UNIT[qd].tolist()
+    hx, hy = px + a[0], py + a[1]  # where the saber is after following through
+    wx, wy = qx - b[0], qy - b[1]  # where it has to be to start the next cut
+    if (qx - hx) ** 2 + (qy - hy) ** 2 < 0.75 ** 2:
+        return False  # the saber is already at the note: no travel to speak of
+    vx, vy = wx - hx, wy - hy
+    t = max(0.0, min(1.0, ((qx - hx) * vx + (qy - hy) * vy) / (vx * vx + vy * vy or 1.0)))
+    return (qx - hx - t * vx) ** 2 + (qy - hy - t * vy) ** 2 < 0.5 ** 2
+
+
+def _swing_back_tokens(base: int, prev_cell: tuple[int, int], prev_direction: int) -> torch.Tensor:
+    """Bool (VOCAB_SIZE,) mask of this hand's notes that ``_swings_back_through`` from its last cut."""
+    m = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
+    for x in range(COLS):
+        for y in range(ROWS):
+            for d in range(8):
+                if _swings_back_through(*prev_cell, prev_direction, x, y, d):
+                    m[_note_tokens_on_cell(base, x, y).start + d] = True
+    return m
+
+
+def _big_reversal_tokens(base: int, prev_cell: tuple[int, int], prev_direction: int) -> torch.Tensor:
+    """Bool mask over the vocab: this hand's notes 2+ cells from its last cell whose cut turns 135+ degrees
+    from its last cut (a long slash reversed). Dots and same-way cuts are never flagged."""
+    mask = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
+    if prev_direction not in _ANGLE:
+        return mask
+    px, py = prev_cell
+    for x in range(4):
+        for y in range(3):
+            if (x - px) ** 2 + (y - py) ** 2 < 4:
+                continue
+            for d in range(8):
+                turn = abs((_ANGLE[d] - _ANGLE[prev_direction] + 180) % 360 - 180)
+                if turn >= 135:
+                    mask[base + x * 27 + y * 9 + d] = True
+    return mask
+
+
+REVERSAL_TARGET = 0.43  # of a hand's swings within half a beat of its last, the share that are big reversals: real Expert per-map median (p10 0.09, p90 0.74; Expert+ median 0.53)
 
 
 def _arc_penalty(base: int, prev_cell: tuple[int, int] | None, prev_direction: int) -> torch.Tensor:
@@ -272,21 +364,51 @@ def _momentum(base: int, prev_direction: int, rot: int) -> torch.Tensor:
     return m
 
 
-# Cut directions pointing away from the body for a hand that has crossed over:
-# left hand in columns 2-3 may not cut Right/UpRight/DownRight, right hand in
-# columns 0-1 may not cut Left/UpLeft/DownLeft. Pattern seen in generated maps:
-# a crossover block facing outward is nearly unhittable; facing inward it is fine.
-_OUTWARD = {LEFT_BASE: ((2, 3), (3, 5, 7)), RIGHT_BASE: ((0, 1), (2, 4, 6))}
+# Cut directions pointing back toward the hand's own side for a hand that has crossed over:
+# left hand in columns 2-3 may not cut Left/UpLeft/DownLeft, right hand in columns 0-1 may
+# not cut Right/UpRight/DownRight. 300 real Expert maps: a right note in column 0 cuts
+# L/UL/DL 80% of the time and R/UR/DR 1% (column 1: 0-8%); the saber reaching across keeps
+# travelling the way it went. (This table was reversed until 2026-10-20; play testing found it.)
+_OUTWARD = {LEFT_BASE: ((2, 3), (2, 4, 6)), RIGHT_BASE: ((0, 1), (3, 5, 7))}
+# And in the hand's own outer column (left x=0, right x=3), no inward cut: real Expert 1.3% (top), 3.8% (middle),
+# 1.6% (bottom) cut inward there, fix9 2-12%. Played: a right note at the top-right corner cutting
+# up-left after a down-right, and another cutting down-left after a down.
+_INWARD_OUTER = {LEFT_BASE: ((0,), (3, 5, 7)), RIGHT_BASE: ((3,), (2, 4, 6))}
+
+
+def _cuts_back(base: int, x: int, d: int) -> bool:
+    """A note this hand should not get: crossed over and cutting back home, or on its outer column cutting inward."""
+    return any(x in cols and d in dirs for cols, dirs in (_OUTWARD[base], _INWARD_OUTER[base]))
 
 
 def _crossover_outward_tokens(base: int) -> list[int]:
-    cols, dirs = _OUTWARD[base]
-    return [base + x * 27 + y * 9 + d for x in cols for y in range(3) for d in dirs]
+    return [base + x * 27 + y * 9 + d for x in range(4) for y in range(3) for d in range(9) if _cuts_back(base, x, d)]
+
+
+def _stack_tokens(last_token: int, base: int) -> torch.Tensor:
+    """This hand's note tokens that may follow ``last_token`` at the same instant: the next cell along the cut line
+    with the same cut (bsmg stack, tower; any adjacent cell for a dot). Ascending cell order, like bomb clusters.
+    Real Expert same-hand pairs: 2.56 per 100 notes adjacent along the cut, 0.48 across it, 1.41 farther apart
+    (windows); any higher cell made mostly far pairs, which gate_patterns then collapsed to singles."""
+    cell, d = divmod(last_token - base, DIRS)
+    x, y = divmod(cell, ROWS)
+    if d == 8:
+        steps = [(dx, dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1) if (dx, dy) != (0, 0)]
+    else:
+        vx, vy = (int(v) for v in _CUT_VEC[d])
+        steps = [(vx, vy), (-vx, -vy)]
+    cells = {(x + dx) * ROWS + y + dy for dx, dy in steps if 0 <= x + dx < COLS and 0 <= y + dy < ROWS}
+    return torch.tensor([base + c * DIRS + d for c in sorted(cells) if c > cell], dtype=torch.long)
+
+
+def _position_closed(token: int) -> bool:
+    """True once a position's RIGHT slot (and any BOMB/WALL extras) has been written."""
+    return token == RIGHT_EMPTY or RIGHT_BASE <= token < RIGHT_BASE + RIGHT_COUNT or is_bomb_token(token) or is_wall_token(token)
 
 
 def _build_grammar_mask(
     last_token: int, last_pos_in_bar: int = -1, current_bar: int = -1,
-    audio_bars: int | None = None, left_cell: tuple[int, int] | None = None,
+    audio_bars: int | None = None, left_cell: tuple[int, int] | None = None, stacks: bool = False,
 ) -> torch.Tensor:
     """Build a boolean mask over the vocabulary for valid next tokens.
 
@@ -316,8 +438,12 @@ def _build_grammar_mask(
         DIFF_*     → BAR_0
         BAR_k      → POS_* | BAR_k+1 | END
         POS_*      → LEFT_* | LEFT_EMPTY
-        LEFT_*     → RIGHT_* | RIGHT_EMPTY
-        RIGHT_*    → POS_* (strictly >) | BAR_k+1 | END
+        LEFT_*     → LEFT_* (higher cell, same cut: a stack) | RIGHT_* | RIGHT_EMPTY
+        RIGHT_*    → RIGHT_* (higher cell, same cut) | BOMB_* | WALL_* | POS_* (strictly >) | BAR_k+1 | END
+        BOMB_c     → BOMB_c' (c' > c) | WALL_* | POS_* (strictly >) | BAR_k+1 | END
+        WALL_*     → POS_* (strictly >) | BAR_k+1 | END
+    A notes-only model (355 logits) never sees the BOMB/WALL rows: generate() pads its logits with -inf.
+    The stack continuations need ``stacks=True``: a checkpoint trained one-note-per-hand puts random mass there.
     """
     mask = torch.zeros(VOCAB_SIZE, dtype=torch.bool)
     next_bar = current_bar + 1
@@ -352,10 +478,24 @@ def _build_grammar_mask(
         if left_cell is not None:
             mask[_note_tokens_on_cell(RIGHT_BASE, *left_cell)] = False
             mask[RIGHT_BASE: RIGHT_BASE + left_cell[0] * ROWS * DIRS] = False  # no RIGHT note left of the LEFT one: arms would cross
+        if stacks and LEFT_BASE <= last_token < LEFT_BASE + LEFT_COUNT:  # or the LEFT stack goes on
+            mask[_stack_tokens(last_token, LEFT_BASE)] = True
+            mask[_crossover_outward_tokens(LEFT_BASE)] = False
 
-    elif last_token == RIGHT_EMPTY or (RIGHT_BASE <= last_token < RIGHT_BASE + RIGHT_COUNT):
-        # After RIGHT → POS (strictly increasing), BAR, or END
-        # Only allow POS tokens with offset > last_pos_in_bar
+    elif _position_closed(last_token):
+        # After RIGHT (or its BOMB/WALL extras) → extras not yet used, POS (strictly increasing), BAR, or END
+        if last_token == RIGHT_EMPTY or (RIGHT_BASE <= last_token < RIGHT_BASE + RIGHT_COUNT):
+            mask[BOMB_BASE: BOMB_BASE + BOMB_COUNT] = True
+        if stacks and RIGHT_BASE <= last_token < RIGHT_BASE + RIGHT_COUNT:  # or the RIGHT stack goes on
+            mask[_stack_tokens(last_token, RIGHT_BASE)] = True
+            mask[_crossover_outward_tokens(RIGHT_BASE)] = False
+            if left_cell is not None:
+                mask[_note_tokens_on_cell(RIGHT_BASE, *left_cell)] = False
+                mask[RIGHT_BASE: RIGHT_BASE + left_cell[0] * ROWS * DIRS] = False
+        elif is_bomb_token(last_token):  # more bombs at this instant, in ascending cell order
+            mask[last_token + 1: BOMB_BASE + BOMB_COUNT] = True
+        if not is_wall_token(last_token):
+            mask[WALL_BASE: WALL_BASE + WALL_COUNT] = True
         min_next = last_pos_in_bar + 1
         if min_next < POS_COUNT:
             mask[POS_BASE + min_next: POS_BASE + POS_COUNT] = True
@@ -386,6 +526,7 @@ def _onset_schedule(
     model: BeatWeaverModel, memory: torch.Tensor, n_frames: int,
     notes_per_beat: float | None = None, min_gap: int = 4, dynamics: float = 1.0,
     stream_bias: float = 1.0,
+    dynamics_range: tuple[float, float] = (0.0, 2.0),
     beat_focus: bool = False,
     beat_floor: float = 0.0,
     precision_prior: float = 0.0,
@@ -400,9 +541,11 @@ def _onset_schedule(
 
     ``dynamics`` shapes the overridden budget to the music: each bar's share is
     scaled by (its expected count / the window mean) ** dynamics, clamped to
-    [0, 2], so the song-wide density still averages ``notes_per_beat`` but quiet
+    ``dynamics_range`` (default [0, 2]), so the song-wide density still averages ``notes_per_beat`` but quiet
     bars thin out and loud bars fill up. 0 is a flat budget (every bar the same,
-    which plays as staccato), 1 follows the onset head fully.
+    which plays as staccato), 1 follows the onset head fully. A narrower range
+    (0.7, 1.3) evens it out: played, one song at the full range had a few 7 notes/s
+    sections between long 2 notes/s ones.
 
     ``stream_bias`` lets a run keep going: after a frame is picked, the frame
     ``min_gap`` later is taken too while its probability is at least
@@ -435,7 +578,7 @@ def _onset_schedule(
         p = p * (PRECISION_WEIGHT.to(p.device) ** precision_prior).repeat(n_frames // beat + 1)[:n_frames]
     bars = [p[b0: b0 + SUBDIVISIONS_PER_BAR] for b0 in range(0, n_frames, SUBDIVISIONS_PER_BAR)]
     shape = (sums / sums.mean().clamp(min=1e-6)).clamp(min=0.0) ** dynamics if notes_per_beat else torch.ones_like(sums)
-    shape = shape.clamp(max=2.0)
+    shape = shape.clamp(*dynamics_range)
     chosen: list[int] = []
     for b0, pb, sh in zip(range(0, n_frames, SUBDIVISIONS_PER_BAR), bars, shape.tolist()):
         k = round(pb.sum().item()) if notes_per_beat is None else round(notes_per_beat * len(pb) / 16 * sh)
@@ -496,6 +639,29 @@ def _onset_schedule(
                 break
     return sorted(chosen)
 
+
+
+def _stream_frames(schedule: list[int], share: float, beat: int = SUBDIVISIONS_PER_BAR // 4, min_len: int = 8) -> set[int]:
+    """Frames of the schedule's dense chains (hits no more than half a beat apart, ``min_len`` or longer), taken
+    longest first until ``share`` of the scheduled notes sit in one. Inside those the decoder plays a stream: one
+    note per hit, hands alternating. Real Expert maps put a median 10% of their notes in streams (p75 18%, 83%
+    of maps have one); the flat doubles lift and same-hand pairs broke every chain here within a few notes."""
+    if share <= 0 or not schedule:
+        return set()
+    chains, run = [], [schedule[0]]
+    for a, b in zip(schedule, schedule[1:]):
+        if b - a <= beat // 2:
+            run.append(b)
+        else:
+            chains.append(run)
+            run = [b]
+    chains.append(run)
+    out: set[int] = set()
+    for c in sorted((c for c in chains if len(c) >= min_len), key=len, reverse=True):
+        if len(out) >= share * len(schedule):
+            break
+        out.update(c)
+    return out
 
 
 def _cap_runs(schedule: list[int], max_run: int, beat: int = SUBDIVISIONS_PER_BAR // 4) -> list[int]:
@@ -569,13 +735,26 @@ def generate(
     notes_per_beat: float | None = None,
     min_gap: int = 4,
     dynamics: float = 1.0,
+    dynamics_range: tuple[float, float] = (0.0, 2.0),
     stream_bias: float = 1.0,
     doubles_bias: float = 0.0,
+    stack_bias: float = 0.0,
+    stack_target: float = STACK_TARGET,
+    bomb_bias: float = 0.0,
+    bomb_gap_bias: float = 0.0,
+    bomb_row_bias: float = 0.0,
+    diagonal_bias: float = 0.0,
+    hand_balance: float = 0.0,
+    crossover_penalty: float = 0.0,
     vision_penalty: float = 3.0,
     vision_max_run: int = 2,
     column_max_run: int = 0,
+    raised_max_run: int = 0,
+    reversal_penalty: float = 0.0,
     beat_focus: bool = False,
     block_near_converging: bool = True,
+    streams: float = 0.0,
+    stacks: bool = False,
     reset_gap: int = 0,
     max_doubles: float = 1.0,
     ebpm_gap: int = 0,
@@ -604,6 +783,9 @@ def generate(
             decoder puts 25-30% of notes there; favourite Expert+ maps 2% (p90 8%).
         vision_max_run: hard cap on consecutive hits that include such a note.
             After that many, centre cells are masked until a hit lands elsewhere.
+        raised_max_run: hard cap on one hand's consecutive notes in rows 1-2. After that many, the hand's
+            next note goes to the bottom row (unless that leaves it nothing). Played, fix7, two songs:
+            long upper-row chains tire the arms even with every whole-song stat in the real Expert range.
         column_max_run: hard cap on one hand's consecutive notes in the same
             column. The arc penalty makes "reverse the last cut" cheapest on the
             same cell, so without this a hand chains straight up/down/up/down in
@@ -676,7 +858,8 @@ def generate(
     n_bars = min(audio_bars or BAR_COUNT, BAR_COUNT)
     schedule = None
     if two_stage:
-        schedule = _cap_runs(_onset_schedule(model, memory, n_bars * SUBDIVISIONS_PER_BAR, notes_per_beat, min_gap, dynamics, stream_bias, beat_focus, beat_floor, precision_prior), max_run)
+        schedule = _cap_runs(_onset_schedule(model, memory, n_bars * SUBDIVISIONS_PER_BAR, notes_per_beat, min_gap, dynamics, stream_bias, dynamics_range, beat_focus, beat_floor, precision_prior), max_run)
+    stream_frames = _stream_frames(schedule, streams) if schedule else set()
     sched_i = 0
 
     # Start with [START, DIFF_x]
@@ -688,23 +871,94 @@ def generate(
     last_dir = {LEFT_BASE: -1, RIGHT_BASE: -1}  # previous cut direction per hand
     last_cell: dict[int, tuple[int, int] | None] = {LEFT_BASE: None, RIGHT_BASE: None}
     left_dir_open = -1  # cut direction of the LEFT note at the open position
+    open_left: list[tuple[int, int]] = []  # every LEFT cell at the open position (a stack has several)
     vision_run = 0  # consecutive hits (POS tokens) that included a vision-cell note
     hit_has_vision = False  # whether the open position has one so far
+    n_stack = 0  # notes that continue a same-hand stack
     col_run = {LEFT_BASE: 0, RIGHT_BASE: 0}  # consecutive notes per hand in its last column
+    raised_run = {LEFT_BASE: 0, RIGHT_BASE: 0}  # consecutive notes per hand in rows 1-2
     last_frame = {LEFT_BASE: -10**9, RIGHT_BASE: -10**9}  # frame of each hand's last note
     drift = {LEFT_BASE: 0, RIGHT_BASE: 0}  # sign of the hand's last lateral move
     rot = {LEFT_BASE: 0, RIGHT_BASE: 0}  # signed count of consecutive same-sense rotations
     beat_frames = SUBDIVISIONS_PER_BAR // 4
     hits = doubles = 0
+    n_hand = {LEFT_BASE: 0, RIGHT_BASE: 0}
+    recent_cross: collections.deque = collections.deque(maxlen=16)
+    cross_tokens = torch.tensor([LEFT_BASE + i for i in range(108) if i // 27 >= 2]
+                                + [RIGHT_BASE + i for i in range(108) if i // 27 <= 1], dtype=torch.long, device=device)
+    n_diag = n_bombs = 0
+    n_pairs = n_rev = 0  # same-hand pairs within half a beat, and how many were big reversals
+    hold_extras, inserted_from, in_gap_pos = False, -1, False
+    diag_tokens = torch.tensor([b + i for b in (LEFT_BASE, RIGHT_BASE) for i in range(108) if i % 9 in (4, 5, 6, 7)],
+                               dtype=torch.long, device=device)
     resets = {(b, d): _reset_tokens(b, d).to(device) for b in (LEFT_BASE, RIGHT_BASE) for d in range(8)}
+    swing_back = {(b, c, d): _swing_back_tokens(b, c, d).to(device) for b in (LEFT_BASE, RIGHT_BASE)
+                  for c in ((x, y) for x in range(COLS) for y in range(ROWS)) for d in range(8)}
     vis = {LEFT_BASE: _vision_tokens(LEFT_BASE).to(device), RIGHT_BASE: _vision_tokens(RIGHT_BASE).to(device)}
 
-    for _ in range(config.max_seq_len - 2):
+    while len(tokens) < config.max_seq_len - 1:  # extras-only positions add 3+ tokens a step: count tokens, not steps
         # Two-stage: timing tokens come from the schedule, not the decoder
-        if schedule is not None and (
-            is_bar_token(tokens[-1]) or tokens[-1] == RIGHT_EMPTY
-            or RIGHT_BASE <= tokens[-1] < RIGHT_BASE + RIGHT_COUNT
-        ):
+        if schedule is not None and (is_bar_token(tokens[-1]) or _position_closed(tokens[-1])):
+            # Timing is scheduled, but the decoder may still add bombs or a wall to the position, or open a
+            # bomb-only position between scheduled ones (92% of Expert bombs sit on a beat with no note).
+            in_bar = sched_i < len(schedule) and schedule[sched_i] // SUBDIVISIONS_PER_BAR == current_bar
+            # Token budget: every scheduled note still to come needs POS, LEFT, RIGHT, plus a BAR per bar and END.
+            # Extras (bombs, walls, bomb-only positions) only get what is left, so the schedule always fits: without
+            # one song's last window hit the 2048 cap at bar 55 of 64 (661 half-beat wall tokens) and the outro
+            # went silent.
+            reserve = 3 * (len(schedule) - sched_i) + (n_bars - current_bar) + 1
+            if config.vocab_size > BOMB_BASE and not hold_extras and len(tokens) + reserve < config.max_seq_len - 8:
+                token_tensor = torch.tensor([tokens], dtype=torch.long, device=device)
+                token_mask = torch.ones(1, len(tokens), dtype=torch.bool, device=device)
+                extra_logits = model.decoder(token_tensor, memory, token_mask, mel_mask)[0, -1]
+                gm = _build_grammar_mask(tokens[-1], last_pos_in_bar, current_bar, audio_bars).to(device)
+                extra_logits[~gm] = float("-inf")
+                n_notes = n_hand[LEFT_BASE] + n_hand[RIGHT_BASE]
+                push = _bomb_push(bomb_bias, n_bombs, n_notes) if bomb_bias > 0 else 0.0
+                if push == float("-inf") or (n_bombs + 1) / max(n_notes, 20) > 2 * BOMB_TARGET:  # 20: a couple early on
+                    extra_logits[BOMB_BASE: BOMB_BASE + BOMB_COUNT] = float("-inf")  # over twice the training rate
+                elif RIGHT_BASE <= tokens[-1] < RIGHT_BASE + RIGHT_COUNT or tokens[-1] == RIGHT_EMPTY:
+                    extra_logits[BOMB_BASE: BOMB_BASE + BOMB_COUNT] += push
+                insert_hi = schedule[sched_i] % SUBDIVISIONS_PER_BAR if in_bar else POS_COUNT
+                insert = slice(POS_BASE + last_pos_in_bar + 1, POS_BASE + insert_hi)
+                if bomb_row_bias > 0 and in_gap_pos and is_bomb_token(tokens[-1]) and push != float("-inf"):
+                    # 38% of real Expert bomb instants have 2+ bombs (rows, frames); after a gap bomb the model gives
+                    # ~8%, having written few bombs earlier in the song. Lift more bombs (ascending cells only).
+                    extra_logits[BOMB_BASE: BOMB_BASE + BOMB_COUNT] += bomb_row_bias
+                if bomb_gap_bias > 0 and push != float("-inf") and not in_gap_pos:  # not mid-cluster
+                    # The model puts ~1% on opening a bomb-only position (it cannot tell from the audio which songs
+                    # are bomb-heavy: 72% of Expert bombs sit in maps with 100+); lift those POS tokens.
+                    extra_logits[insert] += bomb_gap_bias
+                if not torch.isfinite(extra_logits[BOMB_BASE: BOMB_BASE + BOMB_COUNT]).any():
+                    extra_logits[insert] = float("-inf")  # a bomb-only position with no bomb allowed is pointless
+                # Sample "a bomb/wall here", "a bomb-only position at an earlier POS" or "move on" (any other
+                # timing token); the schedule still owns which note position comes next.
+                next_token = _sample_with_filter(extra_logits, temperature, top_k, top_p)
+                if next_token >= BOMB_BASE:
+                    n_bombs += BOMB_BASE <= next_token < BOMB_BASE + BOMB_COUNT
+                    tokens.append(next_token)
+                    continue
+                if insert.start <= next_token < insert.stop:
+                    # Open a bomb-only position only if the decoder agrees the position is empty: it must pick
+                    # LEFT_EMPTY after the POS (a note there would be off the schedule).
+                    pos_logits = model.decoder(torch.tensor([tokens + [next_token]], dtype=torch.long, device=device),
+                                               memory, torch.ones(1, len(tokens) + 1, dtype=torch.bool, device=device),
+                                               mel_mask)[0, -1]
+                    if pos_logits[LEFT_EMPTY] >= pos_logits[LEFT_BASE: LEFT_BASE + LEFT_COUNT].max():
+                        tokens += [next_token, LEFT_EMPTY, RIGHT_EMPTY]
+                        inserted_from, last_pos_in_bar, left_cell = last_pos_in_bar, next_token - POS_BASE, None
+                        open_left = []
+                        in_gap_pos = True
+                    else:
+                        hold_extras = True  # the decoder wanted a note there: leave it to the schedule
+                    continue
+            if tokens[-1] == RIGHT_EMPTY and tokens[-2] == LEFT_EMPTY:
+                # The decoder opened a bomb-only position and then put nothing in it: take it back, and stop it
+                # reopening one before the next scheduled position
+                del tokens[-3:]
+                last_pos_in_bar, hold_extras, in_gap_pos = inserted_from, True, False
+                continue
+            hold_extras = False
             if sched_i < len(schedule) and schedule[sched_i] // SUBDIVISIONS_PER_BAR == current_bar:
                 next_token = POS_BASE + schedule[sched_i] % SUBDIVISIONS_PER_BAR
                 sched_i += 1
@@ -717,6 +971,7 @@ def generate(
                 last_pos_in_bar, current_bar = -1, next_token - BAR_BASE
             elif next_token != END:
                 last_pos_in_bar, left_cell = next_token - POS_BASE, None
+                open_left = []
                 hits += 1
             if next_token == END:
                 break
@@ -729,13 +984,17 @@ def generate(
         logits = model.decoder(token_tensor, memory, token_mask, mel_mask)
         # logits: (1, seq_len, vocab_size) — take last position
         next_logits = logits[0, -1]  # (vocab_size,)
+        if next_logits.numel() < VOCAB_SIZE:  # notes-only checkpoint: it can never emit bombs or walls
+            next_logits = torch.cat([next_logits, torch.full((VOCAB_SIZE - next_logits.numel(),), float("-inf"), device=device)])
 
         # Apply grammar mask (with position tracking for one-note-per-color-per-beat)
         grammar_mask = _build_grammar_mask(
-            tokens[-1], last_pos_in_bar, current_bar, audio_bars, left_cell,
+            tokens[-1], last_pos_in_bar, current_bar, audio_bars, left_cell, stacks=stacks,
         ).to(device)
         if schedule is not None and tokens[-1] == LEFT_EMPTY:
             grammar_mask[RIGHT_EMPTY] = False  # a scheduled position holds a note
+        for c in open_left:  # no RIGHT note on any cell of the open LEFT stack
+            grammar_mask[_note_tokens_on_cell(RIGHT_BASE, *c)] = False
         next_logits[~grammar_mask] = float("-inf")
         grammar_only = next_logits.clone()  # fallback if the style masks below leave nothing
 
@@ -778,6 +1037,15 @@ def generate(
                 if vision_max_run > 0 and vision_run >= vision_max_run:
                     next_logits[vis[base]] = float("-inf")
 
+        # Big fast reversals: a 2+ cell slash reversed within half a beat. Of such fast same-hand swings, real Expert
+        # maps make 43% big reversals (median), Expert+ 53%; extras8 made 55% and played as Expert+. Penalise
+        # them while over the Expert median.
+        if reversal_penalty > 0 and hand_base is not None and last_cell[hand_base] is not None \
+                and n_rev > REVERSAL_TARGET * max(n_pairs, 20):
+            frame = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
+            if (frame - last_frame[hand_base]) / beat_frames <= 0.5:
+                next_logits[_big_reversal_tokens(hand_base, last_cell[hand_base], last_dir[hand_base]).to(device)] -= reversal_penalty
+
         # Straights: stop a hand chaining back-and-forths in one column
         if column_max_run > 0:
             for base in (LEFT_BASE, RIGHT_BASE):
@@ -785,6 +1053,16 @@ def generate(
                     x = last_cell[base][0]
                     next_logits[base + x * 27: base + (x + 1) * 27] = float("-inf")
 
+        # Arm fatigue: after raised_max_run notes in rows 1-2, a hand drops to the bottom row
+        if raised_max_run > 0:
+            for base in (LEFT_BASE, RIGHT_BASE):
+                if raised_run[base] >= raised_max_run:
+                    raised = torch.tensor([base + x * 27 + y * 9 + d for x in range(4) for y in (1, 2) for d in range(9)],
+                                          device=device)
+                    kept = next_logits[raised].clone()
+                    next_logits[raised] = float("-inf")
+                    if not torch.isfinite(next_logits[base: base + 108]).any():
+                        next_logits[raised] = kept  # a forced note with only raised cells left: keep it
         # Swing speed: a hand that swung within 60/max_ebpm s sits this slot out (the other hand takes it)
         if ebpm_gap > 0:
             frame = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
@@ -802,6 +1080,29 @@ def generate(
             base = LEFT_BASE if POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT else RIGHT_BASE
             if 0 <= last_dir[base] < 8 and frame - last_frame[base] < reset_gap:
                 next_logits[resets[(base, last_dir[base])]] = float("-inf")
+            # and no cut the saber would have to swing back through the note to reach, within a beat
+            if 0 <= last_dir[base] < 8 and last_cell[base] is not None and frame - last_frame[base] <= beat_frames:
+                next_logits[swing_back[(base, last_cell[base], last_dir[base])]] = float("-inf")
+
+        # Streams: inside a chosen dense chain of the schedule (``_stream_frames``) each hit is one note and the
+        # hands alternate, so the chain plays as a stream instead of doubles and same-hand pairs breaking it.
+        if stream_frames and current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar in stream_frames:
+            if POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT:
+                if last_frame[LEFT_BASE] > last_frame[RIGHT_BASE]:
+                    next_logits[LEFT_BASE: LEFT_BASE + LEFT_COUNT] = float("-inf")  # right's turn
+                elif last_frame[RIGHT_BASE] > last_frame[LEFT_BASE]:
+                    next_logits[LEFT_EMPTY] = float("-inf")  # left's turn
+            elif LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT:
+                next_logits[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] = float("-inf")  # no double
+            elif tokens[-1] == LEFT_EMPTY:
+                next_logits[RIGHT_EMPTY] = float("-inf")  # the hit needs a note
+
+        # Stacks: run 5 learned them but emits ~0.2 per 100 notes (real Expert 1.3); lift the stack continuation
+        # after a note until stack_target is reached. Needs stacks=True, else the grammar masks them.
+        if stack_bias > 0 and n_stack < stack_target * max(n_hand[LEFT_BASE] + n_hand[RIGHT_BASE], 50):
+            for base, size in ((LEFT_BASE, LEFT_COUNT), (RIGHT_BASE, RIGHT_COUNT)):
+                if base <= tokens[-1] < base + size:
+                    next_logits[_stack_tokens(tokens[-1], base).to(device)] += stack_bias
 
         # Doubles: after a LEFT note, lift every RIGHT note over RIGHT_EMPTY so both hands hit together more often.
         # Favourite Expert+ maps double 9-45% of hits (median 25%); the decoder alone lands near the floor.
@@ -811,12 +1112,46 @@ def generate(
             elif doubles_bias > 0:
                 next_logits[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] += doubles_bias
 
+        # Hand balance: the decoder leans right (one song, extras4: 666 R vs 370 L, singles 449 vs 153). Push the empty
+        # slot of the hand that is ahead so the other hand takes the single: at a POS, LEFT_EMPTY gets less likely
+        # when right leads; after a LEFT note, RIGHT_EMPTY gets more likely. imb in (-1, 1), > 0 = right-heavy.
+        if hand_balance > 0:
+            imb = (n_hand[RIGHT_BASE] - n_hand[LEFT_BASE]) / (n_hand[RIGHT_BASE] + n_hand[LEFT_BASE] + 8)
+            if POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT:
+                next_logits[LEFT_EMPTY] -= hand_balance * imb
+            elif LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT:
+                next_logits[RIGHT_EMPTY] += hand_balance * imb
+
+        # Crossovers: the decoder clusters hands-on-the-wrong-side notes (one song's outro: 34-40% vs 21% in the training
+        # data), where the saber has to come around the other arm. Penalise crossed cells while the last 16 notes
+        # are over the training rate.
+        if crossover_penalty > 0 and len(recent_cross) == 16 and sum(recent_cross) > CROSSOVER_TARGET * 16 and (
+                POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT or LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT):
+            next_logits[cross_tokens] -= crossover_penalty
+
+        # Diagonals: the decoder collapses onto plain up/down cuts (89-98% on one song vs 57% in the training data);
+        # lift the four diagonal cuts of both hands on every note slot.
+        # Only while the running diagonal share is under the training data's 30%: a fixed boost feeds back into a
+        # 90%-diagonal regime (one song: 0.6 -> 11%, 0.8 -> 90%).
+        n_notes = n_hand[LEFT_BASE] + n_hand[RIGHT_BASE]
+        if diagonal_bias > 0 and n_diag < DIAGONAL_TARGET * max(n_notes, 1) and (
+                POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT or LEFT_BASE <= tokens[-1] < LEFT_BASE + LEFT_COUNT):
+            next_logits[diag_tokens] += diagonal_bias
+
+        # Bombs: the model emits ~15x fewer than the training data (0.3 vs 5 per 100 notes on Expert); lift every BOMB
+        # token after a RIGHT note. Notes-only checkpoints have -inf there, so this is a no-op for them.
+        if bomb_bias > 0 and RIGHT_BASE <= tokens[-1] < RIGHT_BASE + RIGHT_COUNT:
+            next_logits[BOMB_BASE: BOMB_BASE + BOMB_COUNT] += _bomb_push(bomb_bias, n_bombs, n_notes)
+
         if not torch.isfinite(next_logits).any():
             next_logits = grammar_only
 
         # Sample
         next_token = _sample_with_filter(next_logits, temperature, top_k, top_p)
+        n_stack += any(b <= tokens[-1] < b + c and b <= next_token < b + c for b, c in ((LEFT_BASE, LEFT_COUNT), (RIGHT_BASE, RIGHT_COUNT)))
         tokens.append(next_token)
+        in_gap_pos = False  # back on the schedule
+        n_bombs += BOMB_BASE <= next_token < BOMB_BASE + BOMB_COUNT
 
         # Update position tracking
         if is_bar_token(next_token):
@@ -825,12 +1160,22 @@ def generate(
         elif POS_BASE <= next_token < POS_BASE + POS_COUNT:
             last_pos_in_bar = next_token - POS_BASE
             left_cell, left_dir_open = None, -1
+            open_left = []
             vision_run = vision_run + 1 if hit_has_vision else 0  # close the previous hit
             hits += 1
             hit_has_vision = False
         elif LEFT_BASE <= next_token < LEFT_BASE + LEFT_COUNT:
             x, y, d = _decode_note_token(next_token, LEFT_BASE)
+            n_hand[LEFT_BASE] += 1
+            if last_cell[LEFT_BASE] is not None and 0 <= last_dir[LEFT_BASE] < 8 and d < 8 \
+                    and (current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar - last_frame[LEFT_BASE]) / beat_frames <= 0.5:
+                n_pairs += 1
+                n_rev += (x - last_cell[LEFT_BASE][0]) ** 2 + (y - last_cell[LEFT_BASE][1]) ** 2 >= 4 \
+                    and abs((_ANGLE[d] - _ANGLE[last_dir[LEFT_BASE]] + 180) % 360 - 180) >= 135
+            recent_cross.append(x >= 2)
+            n_diag += 4 <= d <= 7
             col_run[LEFT_BASE] = col_run[LEFT_BASE] + 1 if last_cell[LEFT_BASE] and last_cell[LEFT_BASE][0] == x else 1
+            raised_run[LEFT_BASE] = raised_run[LEFT_BASE] + 1 if y >= 1 else 0
             if last_cell[LEFT_BASE] is not None and current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar - last_frame[LEFT_BASE] <= beat_frames:
                 drift[LEFT_BASE] = (x > last_cell[LEFT_BASE][0]) - (x < last_cell[LEFT_BASE][0]) or drift[LEFT_BASE]
                 sense = int(_ROT[last_dir[LEFT_BASE], d].item()) if 0 <= last_dir[LEFT_BASE] < 8 and d < 8 else 0
@@ -839,11 +1184,21 @@ def generate(
                 drift[LEFT_BASE], rot[LEFT_BASE] = 0, 0
             last_frame[LEFT_BASE] = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
             left_cell, left_dir_open = (x, y), d
+            open_left.append((x, y))
             last_dir[LEFT_BASE], last_cell[LEFT_BASE] = d, (x, y)
             hit_has_vision |= (x, y) in VISION_CELLS
         elif RIGHT_BASE <= next_token < RIGHT_BASE + RIGHT_COUNT:
             x, y, d = _decode_note_token(next_token, RIGHT_BASE)
+            n_hand[RIGHT_BASE] += 1
+            if last_cell[RIGHT_BASE] is not None and 0 <= last_dir[RIGHT_BASE] < 8 and d < 8 \
+                    and (current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar - last_frame[RIGHT_BASE]) / beat_frames <= 0.5:
+                n_pairs += 1
+                n_rev += (x - last_cell[RIGHT_BASE][0]) ** 2 + (y - last_cell[RIGHT_BASE][1]) ** 2 >= 4 \
+                    and abs((_ANGLE[d] - _ANGLE[last_dir[RIGHT_BASE]] + 180) % 360 - 180) >= 135
+            recent_cross.append(x <= 1)
+            n_diag += 4 <= d <= 7
             col_run[RIGHT_BASE] = col_run[RIGHT_BASE] + 1 if last_cell[RIGHT_BASE] and last_cell[RIGHT_BASE][0] == x else 1
+            raised_run[RIGHT_BASE] = raised_run[RIGHT_BASE] + 1 if y >= 1 else 0
             if last_cell[RIGHT_BASE] is not None and current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar - last_frame[RIGHT_BASE] <= beat_frames:
                 drift[RIGHT_BASE] = (x > last_cell[RIGHT_BASE][0]) - (x < last_cell[RIGHT_BASE][0]) or drift[RIGHT_BASE]
                 sense = int(_ROT[last_dir[RIGHT_BASE], d].item()) if 0 <= last_dir[RIGHT_BASE] < 8 and d < 8 else 0
@@ -861,8 +1216,10 @@ def generate(
     return tokens
 
 
-def last_music_second(audio, sr: int, floor: float = 0.02, hop: int = 2205) -> float:
-    """Time at which the song goes quiet for good: last 100 ms frame whose RMS is above ``floor`` x the peak."""
+def last_music_second(audio, sr: int, floor: float = 0.1, hop: int = 2205) -> float:
+    """Time at which the song goes quiet for good: last 100 ms frame whose RMS is above ``floor`` x the peak.
+    0.02 (-34 dB) counted the ring-out of the final hit as music: played, one song had notes 0.3 and 0.9 s after its
+    last hit, at 5% and 2% of peak. 0.1 (-20 dB) ends it at the hit and keeps a quiet outro (~-13 dB)."""
     import numpy as np
 
     n = len(audio) // hop
@@ -888,17 +1245,30 @@ def generate_full_song(
     notes_per_beat: float | None = None,
     min_gap_seconds: float = 0.2,
     dynamics: float = 1.0,
+    dynamics_range: tuple[float, float] = (0.0, 2.0),
     lead_in_seconds: float = 2.0,
     flow_penalty: float = 2.0,
     end_seconds: float | None = None,
     notes_per_second: float | None = None,
     stream_bias: float = 1.0,
     doubles_bias: float = 0.0,
+    stack_bias: float = 0.0,
+    stack_target: float = STACK_TARGET,
+    bomb_bias: float = 0.0,
+    bomb_gap_bias: float = 0.0,
+    bomb_row_bias: float = 0.0,
+    diagonal_bias: float = 0.0,
+    hand_balance: float = 0.0,
+    crossover_penalty: float = 0.0,
     vision_penalty: float = 3.0,
     vision_max_run: int = 2,
     column_max_run: int = 0,
+    raised_max_run: int = 0,
+    reversal_penalty: float = 0.0,
     beat_focus: bool = False,
     block_near_converging: bool = True,
+    streams: float = 0.0,
+    stacks: bool = False,
     reset_seconds: float = 0.0,
     max_doubles: float = 1.0,
     max_ebpm: float = 0.0,
@@ -909,6 +1279,7 @@ def generate_full_song(
     flow_window: float = 1.5,
     hand_bias: float = 0.0,
     precision_prior: float = 0.0,
+    extras_out: list | None = None,
 ) -> list[Note]:
     """Generate a complete Beat Saber map by processing audio in overlapping windows.
 
@@ -954,11 +1325,13 @@ def generate_full_song(
             model, mel_spectrogram, difficulty, config,
             temperature=temperature, top_k=top_k, top_p=top_p, seed=seed,
             audio_bars=_audio_bars(total_frames), onset_guidance=onset_guidance,
-            two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap, dynamics=dynamics,
-            flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
+            two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap, dynamics=dynamics, dynamics_range=dynamics_range,
+            flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, stack_bias=stack_bias, stack_target=stack_target, bomb_bias=bomb_bias, bomb_gap_bias=bomb_gap_bias, bomb_row_bias=bomb_row_bias, diagonal_bias=diagonal_bias, hand_balance=hand_balance, crossover_penalty=crossover_penalty, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, raised_max_run=raised_max_run, reversal_penalty=reversal_penalty, beat_focus=beat_focus, block_near_converging=block_near_converging, streams=streams, stacks=stacks,
             reset_gap=reset_gap, max_doubles=max_doubles, ebpm_gap=ebpm_gap, beat_floor=beat_floor, max_run=max_run,
             drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias, precision_prior=precision_prior,
         )
+        if extras_out is not None:
+            extras_out.extend(e for es in decode_extras(tokens, bpm) for e in es if lead_in_beat <= e.beat < min(audio_end_beat, end_beat))
         return [n for n in decode_tokens(tokens, bpm) if lead_in_beat <= n.beat < min(audio_end_beat, end_beat)]
 
     # Multi-window generation
@@ -975,6 +1348,7 @@ def generate_full_song(
         pos += stride
 
     all_window_notes: list[tuple[int, list[Note]]] = []
+    all_window_extras: list[list] = []
 
     for i, start in enumerate(starts):
         end = start + max_len
@@ -993,22 +1367,24 @@ def generate_full_song(
             temperature=temperature, top_k=top_k, top_p=top_p, seed=window_seed,
             audio_bars=_audio_bars(min(max_len, total_frames - start)),
             onset_guidance=onset_guidance, two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap,
-            dynamics=dynamics, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, beat_focus=beat_focus, block_near_converging=block_near_converging,
+            dynamics=dynamics, dynamics_range=dynamics_range, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, stack_bias=stack_bias, stack_target=stack_target, bomb_bias=bomb_bias, bomb_gap_bias=bomb_gap_bias, bomb_row_bias=bomb_row_bias, diagonal_bias=diagonal_bias, hand_balance=hand_balance, crossover_penalty=crossover_penalty, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, raised_max_run=raised_max_run, reversal_penalty=reversal_penalty, beat_focus=beat_focus, block_near_converging=block_near_converging, streams=streams, stacks=stacks,
             reset_gap=reset_gap, max_doubles=max_doubles, ebpm_gap=ebpm_gap, beat_floor=beat_floor, max_run=max_run,
             drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias, precision_prior=precision_prior,
         )
 
         # Decode tokens — notes have beats relative to window start (bar 0)
         window_notes = decode_tokens(tokens, bpm)
+        window_extras = [e for es in decode_extras(tokens, bpm) for e in es] if extras_out is not None else []
 
         # Offset all beats by the window's start position in frames
         # Each frame = 1/16th note subdivision, beat = frame / 16
         beat_offset = start / 16.0
-        for note in window_notes:
+        for note in (*window_notes, *window_extras):
             note.beat += beat_offset
             note.time_seconds = note.beat * 60.0 / bpm
 
         all_window_notes.append((start, window_notes))
+        all_window_extras.append(window_extras)
 
     # Merge with midpoint ownership — each window owns notes up to the
     # midpoint of its overlap with the next window, and from the midpoint
@@ -1031,18 +1407,40 @@ def generate_full_song(
             max_beat = overlap_mid_frame / 16.0
 
         result.extend(n for n in notes if min_beat <= n.beat < max_beat)
+        if extras_out is not None:
+            extras_out.extend(e for e in all_window_extras[i] if min_beat <= e.beat < max_beat and lead_in_beat <= e.beat < end_beat)
 
     result = [n for n in result if lead_in_beat <= n.beat < end_beat]
     result.sort(key=lambda n: (n.beat, n.color))
     if reset_seconds > 0:
-        # Windows are decoded independently, so a seam can join two same-way cuts; drop the later one.
-        kept, last = [], {}
-        for n in result:
-            p = last.get(n.color)
-            if p and n.time_seconds - p.time_seconds < reset_seconds and 8 not in (p.cut_direction, n.cut_direction) \
-                    and float(_CUT_VEC[p.cut_direction] @ _CUT_VEC[n.cut_direction]) > 0:
-                continue
-            kept.append(n)
-            last[n.color] = n
-        result = kept
+        # Windows are decoded independently, so a seam can join two same-way cuts
+        result = drop_fast_same_way(result, reset_seconds)
     return result
+
+
+def drop_fast_same_way(notes: list, reset_seconds: float, min_swing_seconds: float = 0.0) -> list:
+    """Drop a hand's note that cuts the same way (``_same_way``) as its previous note under ``reset_seconds``
+    later, or that the saber would swing back through to reach within a beat (``_swings_back_through``), or that
+    comes under ``min_swing_seconds`` after the hand's last kept swing (the ``max_ebpm`` cap: the decoder lets
+    both hands through when both just swung, so a fast stream still held 12% of one song's gaps under it).
+    Also drops a crossed-over note cutting back toward its own side, or an outer-column note cutting inward (``_cuts_back``), which parity repair, collision
+    reversal and emphasis can create after decoding. Also run after the CLI's shaping passes, whose copied sections
+    and added notes can join two."""
+    kept, last = [], {}
+    for n in sorted(notes, key=lambda n: (n.beat, n.color)):
+        if _cuts_back(RIGHT_BASE if n.color else LEFT_BASE, n.x, n.cut_direction):
+            continue
+        p = last.get(n.color)
+        if p and p.beat == n.beat:  # a same-beat group (stack, tower, window, slider) is one swing: keep it whole
+            kept.append(n)
+            continue
+        if p and n.time_seconds - p.time_seconds < reset_seconds and 8 not in (p.cut_direction, n.cut_direction) \
+                and _same_way(p.cut_direction, n.cut_direction):
+            continue
+        if p and n.beat - p.beat <= 1.0 and _swings_back_through(p.x, p.y, p.cut_direction, n.x, n.y, n.cut_direction):
+            continue
+        if p and n.time_seconds - p.time_seconds < min_swing_seconds - 1e-6:
+            continue
+        kept.append(n)
+        last[n.color] = n
+    return kept
