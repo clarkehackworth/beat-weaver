@@ -119,6 +119,13 @@ class TestPlayability:
         issues = _collect(notes)
         assert not any("wide doubles" in m for k, m in _kinds(issues))
 
+    def test_diagonal_stack_along_its_cut_not_flagged(self):
+        # (0,0) and (1,1) both cut up-right: one diagonal swipe. The same pair cutting up-left can't be.
+        along = [_note(4.0, x=0, y=0, color=0, cut=5), _note(4.0, x=1, y=1, color=0, cut=5)]
+        across = [_note(4.0, x=0, y=0, color=0, cut=4), _note(4.0, x=1, y=1, color=0, cut=4)]
+        assert not any("wide doubles" in m for k, m in _kinds(_collect(along)))
+        assert any("wide doubles" in m for k, m in _kinds(_collect(across)))
+
     def test_stacked_double_not_flagged(self):
         # Same column, adjacent rows — a vertical swipe.
         notes = [_note(4.0, x=1, y=0, color=0), _note(4.0, x=1, y=1, color=0)]

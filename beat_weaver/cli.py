@@ -261,6 +261,12 @@ def cmd_generate(args: argparse.Namespace) -> None:
         from beat_weaver.model.inference import drop_fast_same_way
         swing = 60.0 / args.max_ebpm if args.max_ebpm > 0 else 0.0
         by_diff = {d: drop_fast_same_way(ns, args.reset_gap, swing) for d, ns in by_diff.items()}
+    if args.downmap:
+        # Downmapped levels inherit the source's swing speed, so cap each at its own limit (10% under the validator's)
+        from beat_weaver.model.inference import drop_fast_same_way
+        from beat_weaver.model.map_check import MAX_EBPM
+        by_diff = {d: ns if d == args.difficulty else drop_fast_same_way(ns, args.reset_gap, 60.0 / (MAX_EBPM[d] * 0.9))
+                   for d, ns in by_diff.items()}
 
     song_name = Path(args.audio).stem
     output = Path(args.output) if args.output else Path(f"output/{song_name}")

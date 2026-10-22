@@ -1,7 +1,7 @@
 [project]
 name = "beat-weaver"
 version = "0.1.0"
-description = "AI-powered Beat Saber track generator"
+description = "AI-powered Beat Saber track generator (Shouse in the house edition)"
 requires-python = ">=3.11"
 dependencies = [
     "requests>=2.31",

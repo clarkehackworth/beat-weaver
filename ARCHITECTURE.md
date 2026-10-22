@@ -297,6 +297,9 @@ wrong sounds.
 | Evaluation | Onset F1, NPS, parity, diversity against held-out data | Plus beat_sim: reference bands, music fit, kinematic body simulation |
 | Data | BeatSaver + official, about 23% of community maps silently dropped | Case-insensitive Info.dat lookup, hand-picked favourites as a weighted source, undecodable audio excluded |
 | Audio export | Copied as-is, so an mp3 input made an unplayable map | Transcoded to Ogg Vorbis, the only format Beat Saber plays |
+| Vocabulary | Color notes only | Stacks (several notes per hand at one position), 12 BOMB and 128 WALL tokens (vocab 495) |
+| Generation flags | Sampling settings | Play-tested recipes for Hard, Expert and Expert+ (`RECIPE`, `HARD_RECIPE`); Easy and Normal downmapped from Hard |
+| Validation | None | `validate` command: structure, reaction time, swing speed, parity, wide doubles, difficulty ladder |
 
 The upstream generation path still exists. Without `--two-stage`, `generate` behaves as before,
 with the fork's grammar fixes and masks applied.

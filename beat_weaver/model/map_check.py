@@ -228,7 +228,11 @@ def check_difficulty_notes(
             # a tower (one column, vertical cuts) or window (one row, horizontal cuts) is one swipe along the line
             tower = len(cols) == 1 and cuts <= {0, 1, 8}
             window = len(rows) == 1 and cuts <= {2, 3, 8}
-            if not tower and not window and \
+            # a diagonal stack: neighbouring cells along their shared diagonal cut (one swipe; the generator makes these)
+            diag = len(side_notes) == 2 and len(cuts) == 1 and (c := next(iter(cuts))) in _CUT_XY and c >= 4 and \
+                (side_notes[1].get("_lineIndex", 0) - side_notes[0].get("_lineIndex", 0),
+                 side_notes[1].get("_lineLayer", 0) - side_notes[0].get("_lineLayer", 0)) in (_CUT_XY[c], tuple(-v for v in _CUT_XY[c]))
+            if not tower and not window and not diag and \
                not (len(cols) == 1 and max(rows) - min(rows) <= 1) and \
                not (len(rows) == 1 and max(cols) - min(cols) <= 1):
                 wide += 1

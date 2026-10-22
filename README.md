@@ -1,6 +1,6 @@
-[![CI](https://github.com/asfilion/beat-weaver/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/asfilion/beat-weaver/actions/workflows/ci.yml)
+[![CI](https://github.com/clarkehackworth/beat-weaver/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/clarkehackworth/beat-weaver/actions/workflows/ci.yml)
 
-# beat-weaver
+# Beat-Weaver - Shouse in the house edition
 
 AI-powered Beat Saber track generator — feed in a song, get a playable custom map.
 
@@ -18,6 +18,19 @@ Beat Weaver uses machine learning to automatically generate [Beat Saber](https:/
 - **Song in, best map out** — `python -m beat_sim.mapper song.mp3` generates candidates for every difficulty, scores them against reference maps and a kinematic body simulation, and keeps the best set
 
 See **[ARCHITECTURE.md](ARCHITECTURE.md)** for how it works and how this fork differs from upstream.
+
+## What's different from upstream
+
+This edition is a fork of [asfilion/beat-weaver](https://github.com/asfilion/beat-weaver), forked at `9a045e4` (2026-02-17). Upstream's data pipeline, tokenizer layout and model architecture are kept. What changed is how the model is trained and used, with the aim of maps that follow the music and are comfortable to play.
+
+- **Maps follow the song.** The upstream decoder ignored the audio, so every song got much the same map. Here an onset head on the encoder decides when notes go, and the decoder only decides where (`--two-stage`).
+- **Playability rules.** Masks during generation stop collisions, crossed hands cutting back, inward cuts from the outer columns, vision blocks and too-fast swings. A `validate` command checks finished maps.
+- **More of Beat Saber.** The model places stacks, bombs and walls (vocab 495, up from 291). Lightshows are added at export.
+- **Play-tested settings.** The Hard, Expert and Expert+ flags come from rounds of in-game play testing, checked against pattern rates measured on hundreds of real maps. Easy and Normal are thinned from Hard. [docs/MAPPING_GUIDELINES.md](docs/MAPPING_GUIDELINES.md) gives the reason for each flag.
+- **Best map kept.** `beat_sim` scores maps against reference ranges and a body-movement simulation. The mapper generates several candidates per difficulty and keeps the best, and the batch script maps a whole folder of songs.
+- **Data and export fixes.** About 23% of community maps were silently dropped by a case-sensitive file lookup. Audio is now transcoded to Ogg Vorbis, the only format Beat Saber plays. Song titles, artists and cover art are filled in.
+
+[ARCHITECTURE.md](ARCHITECTURE.md#how-this-fork-differs-from-upstream) has the full comparison.
 
 ## Requirements
 
