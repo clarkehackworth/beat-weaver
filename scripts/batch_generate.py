@@ -148,14 +148,15 @@ def flags_for(p: dict, seed: int, diff: str = "", downmap: tuple[str, ...] = ())
             f"--reset-gap {p['reset_gap']} --max-doubles {p['max_doubles']} --seed {seed}")
 
 
-def build_wave(n: int, tasks: list[tuple[str, str]], presets: dict, checkpoint: str, seed: int, downmap: tuple[str, ...] = ()) -> Path:
+def build_wave(n: int, tasks: list[tuple], presets: dict, checkpoint: str, seed: int, downmap: tuple[str, ...] = ()) -> Path:
     lines = ["#!/bin/bash", "set -u", "cd /data", ENV]
     lines.append("run(){ python -m beat_weaver.cli generate --checkpoint " + checkpoint
                  + " --audio \"$1\" --difficulty \"$2\" --output \"$3\" $4 > \"$3.log\" 2>&1; }")
     lines.append(f"mkdir -p {REMOTE_OUT}")
-    for song_name, diff in tasks:
+    for song_name, diff, *nps in tasks:  # an optional third item overrides the preset density (ladder retry)
         outdir = f"{REMOTE_OUT}/{Path(song_name).stem}__{diff}"
-        lines.append(f"run {shlex.quote(REMOTE_INBOX + '/' + song_name)} {diff} {shlex.quote(outdir)} {shlex.quote(flags_for(presets[diff], seed, diff, downmap))} &")
+        p = {**presets[diff], "nps": round(nps[0], 2)} if nps else presets[diff]
+        lines.append(f"run {shlex.quote(REMOTE_INBOX + '/' + song_name)} {diff} {shlex.quote(outdir)} {shlex.quote(flags_for(p, seed, diff, downmap))} &")
     lines.append("wait")
     lines.append(f"echo DONE_WAVE_{n}")
     script = Path(tempfile.gettempdir()) / f"bw_batch_wave{n}.sh"
@@ -211,6 +212,73 @@ def _nps(dat: Path, bpm: float) -> float:
     beats = [n["_time"] for n in json.loads(dat.read_text())["_notes"]]
     span = (max(beats) - min(beats)) * 60 / bpm if beats else 0
     return len(beats) / span if span else 0.0
+
+
+# Remote: notes per second of each song's Expert, Expert+ and Hard (same span measure as _nps), as JSON
+# {stem: [e, e+, hard or null]}.
+_NPS_PY = """
+import json, pathlib, sys
+def nps(folder, diff):
+    bpm = json.loads((folder / "Info.dat").read_text())["_beatsPerMinute"]
+    t = [n["_time"] for n in json.loads((folder / (diff + ".dat")).read_text())["_notes"] if n["_type"] in (0, 1)]
+    return len(t) / ((max(t) - min(t)) * 60 / bpm)
+out = {}
+for d in pathlib.Path(sys.argv[1]).glob("*__Expert"):
+    stem = d.name[:-len("__Expert")]
+    try:
+        r = [nps(d, "Expert"), nps(d.with_name(stem + "__ExpertPlus"), "ExpertPlus")]
+    except (OSError, ValueError, KeyError):
+        continue
+    try:
+        r.append(nps(d.with_name(stem + "__Hard"), "Hard"))
+    except (OSError, ValueError, KeyError):
+        r.append(None)
+    out[stem] = r
+print(json.dumps(out))
+"""
+
+
+def ladder_retry(args, files: list[Path], presets: dict, downmap: tuple[str, ...], rounds: int = 4) -> None:
+    """Regenerate Expert wherever it isn't LADDER_RATIO apart from Hard below and Expert+ above.
+
+    On slow songs the onset head finds few candidate hits, so Expert overshoots its target and Expert+ can't
+    go higher (4.6, 5.4 and 6.2 nps targets gave the same 1041 notes). Moving Expert is the only lever.
+    It aims at the geometric middle of Hard and Expert+ (or 5% under Expert+'s limit when Hard isn't there),
+    scaling the old target by how far Expert has to move. Density jumps unevenly with the target (one song went
+    3.00 -> 4.22 nps on a small change), so once a target has been too sparse and another too dense it bisects.
+    """
+    target = {f.stem: presets["Expert"]["nps"] for f in files}
+    lo: dict[str, float] = {}  # highest target that came out too sparse (Expert under LADDER_RATIO x Hard)
+    hi: dict[str, float] = {}  # lowest target that came out too dense (Expert+ under LADDER_RATIO x Expert)
+    for rnd in range(1, rounds + 1):
+        nps = json.loads(dexec(args.bw_host, args.container,
+                               f"python -c {shlex.quote(_NPS_PY)} {shlex.quote(REMOTE_OUT)}", check=False) or "{}")
+        by_stem = {f.stem: f.name for f in files}
+        redo = []
+        for s, (e, eplus, hard) in nps.items():
+            if s not in by_stem:
+                continue
+            if eplus < LADDER_RATIO * e:
+                hi[s] = min(hi.get(s, target[s]), target[s])
+            elif hard and e < LADDER_RATIO * hard:
+                lo[s] = max(lo.get(s, target[s]), target[s])
+            else:
+                continue
+            if s in lo and s in hi:
+                t = (lo[s] + hi[s]) / 2
+            else:
+                goal = (hard * eplus) ** 0.5 if hard and eplus >= LADDER_RATIO ** 2 * hard else eplus / (LADDER_RATIO * 1.05)
+                t = target[s] * goal / e
+            redo.append((by_stem[s], "Expert", t))
+        if not redo:
+            return
+        print(f"[ladder] round {rnd}: regenerating Expert for {len(redo)} song(s)", flush=True)
+        for i in range(0, len(redo), args.concurrency):
+            wave = redo[i:i + args.concurrency]
+            for name, _, t in wave:
+                target[Path(name).stem] = t
+            script = build_wave(900 + rnd * 10 + i // args.concurrency, wave, presets, args.checkpoint, args.seed, downmap)
+            deploy_and_run_wave(args.bw_host, args.container, 900 + rnd * 10 + i // args.concurrency, script)
 
 
 def main() -> None:
@@ -289,6 +357,9 @@ def main() -> None:
         script = build_wave(i, wave, presets, args.checkpoint, args.seed, downmap)
         deploy_and_run_wave(args.bw_host, args.container, i, script)
         print(f"  wave {i} done in {time.time()-t0:.0f}s", flush=True)
+
+    if "Expert" in args.difficulties and "ExpertPlus" in args.difficulties:
+        ladder_retry(args, files, presets, downmap)
 
     # fetch results into a temp dir, then merge per song
     fetch_tmp = Path(tempfile.mkdtemp(prefix="bw_batch_"))

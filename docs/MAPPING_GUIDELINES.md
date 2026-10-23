@@ -143,7 +143,7 @@ Real Expert maps (300 maps, per 100 notes, p25 / p50 / p75):
 | Diagonals | 21.4 | 31.3 | 40.6 |
 | Dots | 0.1 | 2.7 | 7.2 |
 
-Windows, sliders and pianos are rare. Expert+ uses the same recipe at higher density. Fix10's Expert scores were 88–95, and its Expert+ scores were 88–94.
+Windows, sliders and pianos are rare. Expert+ uses the same recipe at higher density (4.6 notes per second; Expert 3.6). On slow songs (80–96 BPM) the onset head finds few candidate hits, so Expert overshoots its target and Expert+ can't go higher: 4.6, 5.4 and 6.2 targets gave the same note count. `scripts/batch_generate.py` therefore re-generates Expert wherever it isn't 1.1× apart from both Hard and Expert+, aiming between them and bisecting over up to 4 rounds. On the 59-song batch that cleared 22 of 23 ladder warnings. Fix10's Expert scores were 88–95, and its Expert+ scores were 88–94.
 
 ## Lower difficulties (Easy, Normal, Hard)
 
