@@ -738,6 +738,8 @@ def generate(
     dynamics_range: tuple[float, float] = (0.0, 2.0),
     stream_bias: float = 1.0,
     doubles_bias: float = 0.0,
+    parallel_bias: float = 0.0,
+    parallel_streak: float = 0.0,
     stack_bias: float = 0.0,
     stack_target: float = STACK_TARGET,
     bomb_bias: float = 0.0,
@@ -882,6 +884,7 @@ def generate(
     rot = {LEFT_BASE: 0, RIGHT_BASE: 0}  # signed count of consecutive same-sense rotations
     beat_frames = SUBDIVISIONS_PER_BAR // 4
     hits = doubles = 0
+    par_run, hit_parallel = 0, False  # parallel instants in a row, and whether the open one is parallel
     n_hand = {LEFT_BASE: 0, RIGHT_BASE: 0}
     recent_cross: collections.deque = collections.deque(maxlen=16)
     cross_tokens = torch.tensor([LEFT_BASE + i for i in range(108) if i // 27 >= 2]
@@ -973,6 +976,7 @@ def generate(
                 last_pos_in_bar, left_cell = next_token - POS_BASE, None
                 open_left = []
                 hits += 1
+                par_run, hit_parallel = (par_run + 1 if hit_parallel else 0), False
             if next_token == END:
                 break
             continue
@@ -1111,6 +1115,15 @@ def generate(
                 next_logits[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] = float("-inf")
             elif doubles_bias > 0:
                 next_logits[RIGHT_BASE: RIGHT_BASE + RIGHT_COUNT] += doubles_bias
+            # Parallel: the RIGHT note beside the LEFT one (same row, 1-2 columns right) with the same cut, so both
+            # hands swing together. Favourites: 4.5-8.8 per 100 notes (E+ to Hard); the decoder made 3.1-3.9.
+            # parallel_streak adds more per parallel instant already in a row (up to 3), so the hands stay in sync.
+            lift = parallel_bias + parallel_streak * min(par_run, 3)
+            if lift > 0 and left_cell is not None and 0 <= left_dir_open < 8:
+                for x in range(left_cell[0] + 1, min(left_cell[0] + 3, COLS)):
+                    next_logits[_note_tokens_on_cell(RIGHT_BASE, x, left_cell[1]).start + left_dir_open] += lift
+        elif parallel_streak > 0 and par_run and POS_BASE <= tokens[-1] < POS_BASE + POS_COUNT:
+            next_logits[LEFT_EMPTY] -= parallel_streak * min(par_run, 3)  # keep the left hand in the streak
 
         # Hand balance: the decoder leans right (one song, extras4: 666 R vs 370 L, singles 449 vs 153). Push the empty
         # slot of the hand that is ahead so the other hand takes the single: at a POS, LEFT_EMPTY gets less likely
@@ -1162,6 +1175,7 @@ def generate(
             left_cell, left_dir_open = None, -1
             open_left = []
             vision_run = vision_run + 1 if hit_has_vision else 0  # close the previous hit
+            par_run, hit_parallel = (par_run + 1 if hit_parallel else 0), False
             hits += 1
             hit_has_vision = False
         elif LEFT_BASE <= next_token < LEFT_BASE + LEFT_COUNT:
@@ -1207,6 +1221,8 @@ def generate(
                 drift[RIGHT_BASE], rot[RIGHT_BASE] = 0, 0
             last_frame[RIGHT_BASE] = current_bar * SUBDIVISIONS_PER_BAR + last_pos_in_bar
             doubles += LEFT_BASE <= tokens[-2] < LEFT_BASE + LEFT_COUNT
+            hit_parallel = LEFT_BASE <= tokens[-2] < LEFT_BASE + LEFT_COUNT and left_cell is not None \
+                and d == left_dir_open < 8 and y == left_cell[1] and 0 < x - left_cell[0] <= 2
             last_dir[RIGHT_BASE], last_cell[RIGHT_BASE] = d, (x, y)
             hit_has_vision |= (x, y) in VISION_CELLS
 
@@ -1252,6 +1268,8 @@ def generate_full_song(
     notes_per_second: float | None = None,
     stream_bias: float = 1.0,
     doubles_bias: float = 0.0,
+    parallel_bias: float = 0.0,
+    parallel_streak: float = 0.0,
     stack_bias: float = 0.0,
     stack_target: float = STACK_TARGET,
     bomb_bias: float = 0.0,
@@ -1326,7 +1344,7 @@ def generate_full_song(
             temperature=temperature, top_k=top_k, top_p=top_p, seed=seed,
             audio_bars=_audio_bars(total_frames), onset_guidance=onset_guidance,
             two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap, dynamics=dynamics, dynamics_range=dynamics_range,
-            flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, stack_bias=stack_bias, stack_target=stack_target, bomb_bias=bomb_bias, bomb_gap_bias=bomb_gap_bias, bomb_row_bias=bomb_row_bias, diagonal_bias=diagonal_bias, hand_balance=hand_balance, crossover_penalty=crossover_penalty, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, raised_max_run=raised_max_run, reversal_penalty=reversal_penalty, beat_focus=beat_focus, block_near_converging=block_near_converging, streams=streams, stacks=stacks,
+            flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, parallel_bias=parallel_bias, parallel_streak=parallel_streak, stack_bias=stack_bias, stack_target=stack_target, bomb_bias=bomb_bias, bomb_gap_bias=bomb_gap_bias, bomb_row_bias=bomb_row_bias, diagonal_bias=diagonal_bias, hand_balance=hand_balance, crossover_penalty=crossover_penalty, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, raised_max_run=raised_max_run, reversal_penalty=reversal_penalty, beat_focus=beat_focus, block_near_converging=block_near_converging, streams=streams, stacks=stacks,
             reset_gap=reset_gap, max_doubles=max_doubles, ebpm_gap=ebpm_gap, beat_floor=beat_floor, max_run=max_run,
             drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias, precision_prior=precision_prior,
         )
@@ -1367,7 +1385,7 @@ def generate_full_song(
             temperature=temperature, top_k=top_k, top_p=top_p, seed=window_seed,
             audio_bars=_audio_bars(min(max_len, total_frames - start)),
             onset_guidance=onset_guidance, two_stage=two_stage, notes_per_beat=notes_per_beat, min_gap=min_gap,
-            dynamics=dynamics, dynamics_range=dynamics_range, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, stack_bias=stack_bias, stack_target=stack_target, bomb_bias=bomb_bias, bomb_gap_bias=bomb_gap_bias, bomb_row_bias=bomb_row_bias, diagonal_bias=diagonal_bias, hand_balance=hand_balance, crossover_penalty=crossover_penalty, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, raised_max_run=raised_max_run, reversal_penalty=reversal_penalty, beat_focus=beat_focus, block_near_converging=block_near_converging, streams=streams, stacks=stacks,
+            dynamics=dynamics, dynamics_range=dynamics_range, flow_penalty=flow_penalty, stream_bias=stream_bias, doubles_bias=doubles_bias, parallel_bias=parallel_bias, parallel_streak=parallel_streak, stack_bias=stack_bias, stack_target=stack_target, bomb_bias=bomb_bias, bomb_gap_bias=bomb_gap_bias, bomb_row_bias=bomb_row_bias, diagonal_bias=diagonal_bias, hand_balance=hand_balance, crossover_penalty=crossover_penalty, vision_penalty=vision_penalty, vision_max_run=vision_max_run, column_max_run=column_max_run, raised_max_run=raised_max_run, reversal_penalty=reversal_penalty, beat_focus=beat_focus, block_near_converging=block_near_converging, streams=streams, stacks=stacks,
             reset_gap=reset_gap, max_doubles=max_doubles, ebpm_gap=ebpm_gap, beat_floor=beat_floor, max_run=max_run,
             drift_bias=drift_bias, momentum_bias=momentum_bias, flow_window=flow_window, hand_bias=hand_bias, precision_prior=precision_prior,
         )

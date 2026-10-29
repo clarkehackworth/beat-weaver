@@ -226,7 +226,7 @@ def cmd_generate(args: argparse.Namespace) -> None:
         two_stage=args.two_stage, notes_per_beat=args.notes_per_beat, min_gap_seconds=args.min_gap,
         dynamics=args.dynamics, dynamics_range=tuple(args.dynamics_range), lead_in_seconds=args.lead_in, flow_penalty=args.flow_penalty,
         end_seconds=last_music_second(audio, sr),
-        notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, stack_bias=args.stack_bias, stack_target=args.stack_rate / 100, bomb_bias=args.bomb_bias, bomb_gap_bias=args.bomb_gap_bias, bomb_row_bias=args.bomb_row_bias, diagonal_bias=args.diagonal_bias, hand_balance=args.hand_balance, crossover_penalty=args.crossover_penalty, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, column_max_run=args.column_max_run, raised_max_run=args.raised_max_run, reversal_penalty=args.reversal_penalty, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging, streams=args.streams, stacks=args.stacks,
+        notes_per_second=args.notes_per_second, stream_bias=args.stream_bias, doubles_bias=args.doubles_bias, parallel_bias=args.parallel_bias, parallel_streak=args.parallel_streak, stack_bias=args.stack_bias, stack_target=args.stack_rate / 100, bomb_bias=args.bomb_bias, bomb_gap_bias=args.bomb_gap_bias, bomb_row_bias=args.bomb_row_bias, diagonal_bias=args.diagonal_bias, hand_balance=args.hand_balance, crossover_penalty=args.crossover_penalty, vision_penalty=args.vision_penalty, vision_max_run=args.vision_max_run, column_max_run=args.column_max_run, raised_max_run=args.raised_max_run, reversal_penalty=args.reversal_penalty, beat_focus=args.beat_focus, block_near_converging=not args.allow_near_converging, streams=args.streams, stacks=args.stacks,
         reset_seconds=args.reset_gap, max_doubles=args.max_doubles, max_ebpm=args.max_ebpm, beat_floor=args.beat_floor, max_run=args.max_run,
         drift_bias=args.drift_bias, momentum_bias=args.momentum_bias, flow_window=args.flow_window,
         hand_bias=args.hand_bias, precision_prior=args.precision_prior,
@@ -489,6 +489,10 @@ def main() -> None:
                      help="With --stacks: logit bonus for continuing a hand's note as a stack, until --stack-rate")
     gen.add_argument("--doubles-bias", type=float, default=0.0,
                      help="Logit bonus for a right-hand note right after a left-hand note (0 = off; ~1.5 reaches favourites' doubles rate)")
+    gen.add_argument("--parallel-bias", type=float, default=0.0,
+                     help="Logit bonus for a right-hand note beside the left one (same row, 1-2 columns right) with the same cut (0 = off)")
+    gen.add_argument("--parallel-streak", type=float, default=0.0,
+                     help="Extra parallel bonus per parallel instant already in a row (up to 3), for longer in-sync stretches (0 = off)")
     gen.add_argument("--vision-penalty", type=float, default=3.0,
                      help="Logit penalty on notes in the middle-row centre cells (vision blocks); favourites keep ~2%% there")
     gen.add_argument("--vision-max-run", type=int, default=2,

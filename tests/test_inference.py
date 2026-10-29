@@ -597,6 +597,48 @@ class TestGenerateFullSong:
         r0, n0 = rate(0.0); r1, n1 = rate(20.0)
         assert n0 > 20 and r1 >= r0 and r1 >= 0.95, (r0, r1)  # a few slots have every RIGHT cut masked by cut-through
 
+    def test_parallel_bias_raises_side_by_side_same_cut(self, small_model):
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        def rate(bias):
+            p = tot = 0
+            for seed in range(12):
+                toks = generate(model, mel, "Expert", config, seed=seed, temperature=1.5, audio_bars=2, doubles_bias=20.0,
+                                parallel_bias=bias)
+                for a, b in zip(toks, toks[1:]):
+                    if LEFT_BASE <= a < LEFT_BASE + LEFT_COUNT and RIGHT_BASE <= b < RIGHT_BASE + RIGHT_COUNT:
+                        (lx, ly, ld), (rx, ry, rd) = _decode_note_token(a, LEFT_BASE), _decode_note_token(b, RIGHT_BASE)
+                        tot += 1; p += ld == rd < 8 and ly == ry and 0 < rx - lx <= 2
+            return p / max(tot, 1), tot
+        (r0, n0), (r1, _) = rate(0.0), rate(20.0)
+        assert n0 > 20 and r1 > max(2 * r0, 0.5), (r0, r1)
+
+    def test_parallel_streak_lengthens_in_sync_runs(self, small_model):
+        model, config = small_model
+        mel = torch.randn(80, config.max_audio_len)
+        def mean_run(streak, two_stage=False):
+            runs = []
+            for seed in range(12):
+                toks = generate(model, mel, "Expert", config, seed=seed, temperature=1.5, audio_bars=2 if two_stage else 4, doubles_bias=3.0,
+                                parallel_bias=3.0, parallel_streak=streak, two_stage=two_stage,
+                                notes_per_beat=2.0)
+                cur, left = 0, None
+                for t in toks:
+                    if POS_BASE <= t < POS_BASE + POS_COUNT or t == END:
+                        if left is not True: runs.append(cur); cur = 0
+                        cur += left is True
+                        left = None
+                    elif LEFT_BASE <= t < LEFT_BASE + LEFT_COUNT:
+                        left = _decode_note_token(t, LEFT_BASE)
+                    elif RIGHT_BASE <= t < RIGHT_BASE + RIGHT_COUNT and isinstance(left, tuple):
+                        (lx, ly, ld), (rx, ry, rd) = left, _decode_note_token(t, RIGHT_BASE)
+                        left = ld == rd < 8 and ly == ry and 0 < rx - lx <= 2
+            runs = [r for r in runs if r]
+            return sum(runs) / max(len(runs), 1)
+        for two_stage in (False, True):  # the batch recipe decodes two-stage: the schedule opens the positions
+            r0, r1 = mean_run(0.0, two_stage), mean_run(8.0, two_stage)
+            assert r1 > r0 * 1.15, (two_stage, r0, r1)
+
     def test_beat_focus_leaves_weak_beats_with_one_note(self, small_model):
         from beat_weaver.model.inference import _onset_schedule
         model, config = small_model
