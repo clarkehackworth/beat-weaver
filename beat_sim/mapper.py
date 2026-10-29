@@ -43,7 +43,7 @@ PRESET = {
 # 210-note eighth-note line (93% half-beat gaps, 17 rests/min). Quiet beats now rest, runs are capped and
 # end in a whole-beat rest, extras bunch on the strongest beats, chains take hot sixteenths, loud bars fill more.
 DOUBLES_FRACTION = {"Easy": 0.10, "Normal": 0.15, "Hard": 0.20, "Expert": 0.25, "ExpertPlus": 0.25}
-DENSITY_SCALE = {"Hard": 1.15, "Expert": 1.1, "ExpertPlus": 1.1}  # ponytail: generated nps lands ~18% over target and the scorer picked the low candidate; tune per play test
+DENSITY_SCALE = {"Hard": 1.035, "Expert": 1.1, "ExpertPlus": 1.1}  # ponytail: generated nps lands ~18% over target and the scorer picked the low candidate; tune per play test
 DENSITY_BONUS = {"Expert": 10.0, "ExpertPlus": 10.0}  # max points added to the ranking score (not the report)
 DENSITY_VARIANTS = (0.85, 1.0, 1.15)
 # bsmg-guideline shaping applied to every candidate (see beat_weaver/model/shaping.py and docs/MAPPING_GUIDELINES.md)
@@ -54,16 +54,18 @@ SHAPING = {"drift_bias": 1.5, "momentum_bias": 0.5, "flow_window": 1.5, "hand_bi
 RECIPE = ("--two-stage --min-gap 0.1 --doubles-bias 3.5 --max-doubles 0.3 --max-ebpm 350 --flow-penalty 4 --dynamics 1 "
           "--vision-penalty 6 --stream-bias 1.0 --column-max-run 4 --bomb-bias 4 --bomb-gap-bias 8 --bomb-row-bias 3 "
           "--diagonal-bias 1.5 --hand-balance 10 --walls --crossover-penalty 2 --reversal-penalty 4 --raised-max-run 3 "
-          "--streams 0.12 --stacks --stack-rate 3.3 --stack-bias 4")
+          "--streams 0.12 --stacks --stack-rate 3.3 --stack-bias 4 --parallel-bias 1.5 --parallel-streak 4")
 RECIPE_DIFFS = ("Expert", "ExpertPlus")
 # Hard is the scaled-down recipe, generated once with Easy and Normal downmapped from it (generating those two directly
 # gave dense, parity-poor maps). Real Hard maps (150 sampled): 0.7 stacks, 2.4 stream notes, 1 gallop, 11 doubles,
 # 15 crossovers, 23 diagonals per 100 notes, so every pattern flag is milder than the Expert one. A/B on 4 songs,
 # Easy/Normal/Hard mean score: old preset 68/74/78, this 78/84/86 (docs/MAPPING_GUIDELINES.md "Lower difficulties").
-HARD_RECIPE = ("--two-stage --min-gap 0.15 --doubles-bias 0.9 --max-doubles 0.3 --max-ebpm 280 --flow-penalty 4 --dynamics 1 "
+# Doubles 0.9 -> 2.0 plus --parallel-bias 2 --parallel-streak 4 (2026-10-24): Hard made 6.5% doubles vs the
+# favourites' 24%. The extra doubles add notes, so Hard density dropped 3.1 -> 2.8 nps (DENSITY_SCALE 1.15 -> 1.035).
+HARD_RECIPE = ("--two-stage --min-gap 0.15 --doubles-bias 2.0 --max-doubles 0.3 --max-ebpm 280 --flow-penalty 4 --dynamics 1 "
                "--vision-penalty 6 --stream-bias 1.0 --column-max-run 4 --raised-max-run 2 --bomb-bias 4 --bomb-gap-bias 8 "
                "--bomb-row-bias 3 --diagonal-bias 1.0 --hand-balance 10 --walls --crossover-penalty 4 --reversal-penalty 4 "
-               "--streams 0.05 --stacks --stack-rate 0.7 --stack-bias 2")
+               "--streams 0.05 --stacks --stack-rate 0.7 --stack-bias 2 --parallel-bias 2 --parallel-streak 4")
 DOWNMAP_FROM = {"Easy": "Hard", "Normal": "Hard", "Hard": "Hard"}  # ponytail: Hard is generated; Easy/Normal are thinned from it  # ponytail: two hedges around the preset; widen if winners sit at an edge
 
 

@@ -102,7 +102,7 @@ These are the Expert and Expert+ flags from ten rounds of in-game play testing (
 | Flag | Value | Why |
 |---|---|---|
 | `--notes-per-second` | 3.6–4.2 | 4.2 for busy songs, 3.6 for the rest. The mapper's Expert sweep is 3.1, 3.7 and 4.2. |
-| `--doubles-bias` / `--max-doubles` | 3.5 / 0.3 | Brings doubles up to the real median of about 15 per 100 notes, with a cap. |
+| `--doubles-bias` / `--max-doubles` | 3.5 / 0.3 | Brings doubles up to the real median of about 15 per 100 notes, with a cap. The 59-song batch made doubles at 22% of hits, matching the favourites' 21%. |
 | `--max-ebpm` | 350 | Above this, fast same-hand runs tire players. |
 | `--crossover-penalty` | 2 | Real maps cross over about 20 times per 100 notes. A crossed hand cuts outward, and the cut-back mask always applies (see below). |
 | `--reversal-penalty` | 4 | Avoids awkward reversals on consecutive notes. A down-right then up-left swing is fine for parity, so this can't stop inward cuts in the outer column. The mask does that. |
@@ -112,6 +112,7 @@ These are the Expert and Expert+ flags from ten rounds of in-game play testing (
 | `--streams` | 0.12 default | Use 0.18 for songs with long driving sections and 0.08 for songs that are already busy. The real median is about 10 stream notes per 100, the p75 about 18. |
 | `--dynamics-range LO HI` | 0 2 default | Use `0.7 1.3` when a song has a few very busy sections and many sparse ones. One song passed on the average but felt uneven to play. |
 | `--diagonal-bias` | 1.5 | Real maps have 31 diagonals per 100 notes. |
+| `--parallel-bias` / `--parallel-streak` | 1.5 / 4 | Parallel doubles: both hands in one row, right hand 1–2 columns right, same cut, so they swing in sync. The favourites have 5.6 per 100 Expert notes and the 59-song batch had 4.0. The bias alone matched the rate but gave few runs. The streak bonus grows with each parallel hit in a row (up to 3), giving runs of 6+ and 63–109 in-sync notes per 100. Play-tested on Remedy (2026-10-24), liked over streak 0 and 2; composite unchanged. |
 | `--hand-balance` | 10 | Keeps the two hands' note counts even. |
 | `--bomb-bias 4 --bomb-gap-bias 8 --bomb-row-bias 3 --walls` | | Bombs go in gaps, off the saber's path. Walls go in rests. |
 | `--flow-penalty 4 --vision-penalty 6 --stream-bias 1.0 --min-gap 0.1 --dynamics 1` | | Unchanged from the earlier presets. |
@@ -168,8 +169,15 @@ What changed, tested on the same four songs (mean score Easy / Normal / Hard):
 - `shaping.TARGET_NPS["Easy"]` went from 1.20 to 1.50. The downmapped Easy was landing at 1.0 notes per second, below the real band (1.09–1.83).
 - `_simplify_cut` lets Normal keep a sideways cut after a vertical one. Normal was 98% up/down before, and the band is 57–83%.
 
+Parallel doubles (2026-10-24). The 59-song batch made doubles at only 6.5% of Hard hits, against 24% in the favourites, and 1.6 parallel doubles per 100 notes against 8.8. `HARD_RECIPE` now has `--doubles-bias 2.0 --parallel-bias 2 --parallel-streak 4`, the same in-sync streaks as Expert (see the Expert table). The extra doubles add notes, so Hard density went from 3.1 to 2.8 notes per second (`DENSITY_SCALE["Hard"]` 1.035, the batch preset 2.8). On Remedy, 2 seeds:
+
+| Hard | Doubles / hits | In-sync notes per 100 | Output nps | Composite |
+|---|---|---|---|---|
+| Old recipe, 3.6 nps | 12.5% | — | — | 84.0 |
+| New, 3.1 nps | 28% | 70–76 | 4.04–4.13 (band top 4.09) | 83–88 |
+| New, 2.8 nps | 29% | 47–53 | 3.67 | 94–94.5 |
+
 Known gaps:
-- Hard doubles are about 6 per 100, below the real median of 11. Raising `--doubles-bias` helped only a little.
 - Easy and Normal still have no diagonals and no crossovers. The tier rules forbid them (`shaping.TIERS`), although a quarter of real Easy and Normal maps have some. That is a design choice to revisit, not a bug.
 - Hard still often has too many notes in the top row, and sometimes `shrado`.
 

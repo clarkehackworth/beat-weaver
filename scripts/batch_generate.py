@@ -63,7 +63,7 @@ AUDIO_EXTS = {".mp3", ".ogg", ".wav", ".flac", ".m4a"}
 DEFAULT_PRESET = {
     "Easy":       dict(nps=1.33, min_gap=0.4, doubles_bias=0.3, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.15),
     "Normal":     dict(nps=1.94, min_gap=0.25, doubles_bias=0.5, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.2),
-    "Hard":       dict(nps=3.1, min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25),
+    "Hard":       dict(nps=2.8, min_gap=0.15, doubles_bias=0.8, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=0, reset_gap=0.5, max_doubles=0.25),
     "Expert":     dict(nps=3.6, min_gap=0.1, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=1.0, column_max_run=4, reset_gap=0.5, max_doubles=0.4),
     "ExpertPlus": dict(nps=4.6, min_gap=0.1, doubles_bias=1.0, flow_penalty=4, dynamics=1, vision_penalty=6, stream_bias=0.8, column_max_run=4, reset_gap=0.5, max_doubles=0.45),
 }
