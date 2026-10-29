@@ -175,7 +175,7 @@ def deploy_and_run_wave(host: str, container: str, n: int, script: Path) -> None
 def merge_song(orig: Path, outdir: Path, dats: dict[str, Path], author: str, web_cover: bool) -> str:
     """`dats` maps difficulty -> its generated map folder (Info.dat, <diff>.dat, song.egg)."""
     from beat_sim.meta import song_meta, extract_cover
-    from beat_weaver.model.exporter import _NJS_TABLE
+    from beat_weaver.model.exporter import jump_settings
     # The .dat beats are in the generator's detected BPM, so Info.dat must carry that BPM, and the
     # generator already transcoded the audio to ogg (Beat Saber can't play an mp3 renamed .egg).
     infos = {d: json.loads((p / "Info.dat").read_text()) for d, p in dats.items()}
@@ -192,8 +192,10 @@ def merge_song(orig: Path, outdir: Path, dats: dict[str, Path], author: str, web
     base["_songFilename"] = "song.egg"
     cover_name, cover_src = extract_cover(orig, outdir, None, base["_songName"], base["_songAuthorName"], web=web_cover)
     base["_coverImageFilename"] = cover_name
+    # NJS and offset from the exporter: offset 0 left slow and mid-tempo Easy/Normal at 1.5-1.75 s reaction time
     beatmaps = [{"_difficulty": d, "_difficultyRank": RANK[d], "_beatmapFilename": f"{d}.dat",
-                 "_noteJumpMovementSpeed": _NJS_TABLE[d], "_noteJumpStartBeatOffset": 0}
+                 "_noteJumpMovementSpeed": (js := jump_settings(d, base["_beatsPerMinute"]))[0],
+                 "_noteJumpStartBeatOffset": js[1]}
                 for d in ALL_DIFFS if d in dats]
     base["_difficultyBeatmapSets"] = [{"_beatmapCharacteristicName": "Standard", "_difficultyBeatmaps": beatmaps}]
     (outdir / "Info.dat").write_text(json.dumps(base, indent=2))
